@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from app.db import Base, engine
-from app.routers import candles, ingest, symbols
+from app.routers import candles, indicators, ingest, symbols
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -23,6 +23,7 @@ app = FastAPI(title="NSE Market Data Service", version="0.1.0", lifespan=lifespa
 app.include_router(symbols.router)
 app.include_router(ingest.router)
 app.include_router(candles.router)
+app.include_router(indicators.router)
 
 
 @app.get("/health")
