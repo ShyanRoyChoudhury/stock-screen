@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16
+    container_name: stockscreen-db
+    environment:
+      POSTGRES_USER: stockscreen
+      POSTGRES_PASSWORD: stockscreen
+      POSTGRES_DB: stockscreen
+    ports:
+      # 5433 on the host: 5432 is taken by another local project's Postgres.
+      - "5433:5432"
+    volumes:
+      - stockscreen_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockscreen -d stockscreen"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  stockscreen_pgdata:
