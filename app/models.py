@@ -110,6 +110,44 @@ class IndicatorValue(Base):
     )
 
 
+class Signal(Base):
+    """A strategy signal on one candle. Signals are regenerated per run
+    (delete + insert per symbol/timeframe/strategy) so revised source data
+    can't leave stale signals behind. `details` holds the strategy-specific
+    fields (score, conviction, rvol, momentum, ...) exactly as the gist
+    emits them.
+
+    Deliberately NOT unique on (symbol, timeframe, strategy, ts): the
+    pipeline can emit a RETEST and an IMMEDIATE signal on the same bar
+    (a retest bar that is itself a fresh breakout) — that is spec output.
+    Idempotency comes from delete-then-insert regeneration, not a key."""
+
+    __tablename__ = "signals"
+    __table_args__ = (
+        Index("ix_signals_sym_tf_strat_ts", "symbol_id", "timeframe",
+              "strategy", "ts"),
+        Index("ix_signals_ts", "ts"),
+        Index("ix_signals_strategy_ts", "strategy", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    symbol_id: Mapped[int] = mapped_column(ForeignKey("symbols.id"), index=True)
+    timeframe: Mapped[str] = mapped_column(String(4))
+    strategy: Mapped[str] = mapped_column(String(24))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    entry_mode: Mapped[str | None] = mapped_column(String(16))  # pipeline only
+    entry: Mapped[float] = mapped_column(Float)
+    stop_loss: Mapped[float] = mapped_column(Float)
+    target_1: Mapped[float] = mapped_column(Float)
+    target_2: Mapped[float] = mapped_column(Float)
+    risk_pct: Mapped[float | None] = mapped_column(Float)
+    rr_ratio: Mapped[float | None] = mapped_column(Float)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class IngestRun(Base):
     __tablename__ = "ingest_runs"
 

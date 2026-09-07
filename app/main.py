@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from app.db import Base, engine
-from app.routers import candles, indicators, ingest, symbols
+from app.routers import candles, indicators, ingest, signals, symbols
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -24,6 +24,7 @@ app.include_router(symbols.router)
 app.include_router(ingest.router)
 app.include_router(candles.router)
 app.include_router(indicators.router)
+app.include_router(signals.router)
 
 
 @app.get("/health")
