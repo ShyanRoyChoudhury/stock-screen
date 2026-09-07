@@ -115,12 +115,17 @@ class Signal(Base):
     (delete + insert per symbol/timeframe/strategy) so revised source data
     can't leave stale signals behind. `details` holds the strategy-specific
     fields (score, conviction, rvol, momentum, ...) exactly as the gist
-    emits them."""
+    emits them.
+
+    Deliberately NOT unique on (symbol, timeframe, strategy, ts): the
+    pipeline can emit a RETEST and an IMMEDIATE signal on the same bar
+    (a retest bar that is itself a fresh breakout) — that is spec output.
+    Idempotency comes from delete-then-insert regeneration, not a key."""
 
     __tablename__ = "signals"
     __table_args__ = (
-        UniqueConstraint("symbol_id", "timeframe", "strategy", "ts",
-                         name="uq_signal"),
+        Index("ix_signals_sym_tf_strat_ts", "symbol_id", "timeframe",
+              "strategy", "ts"),
         Index("ix_signals_ts", "ts"),
         Index("ix_signals_strategy_ts", "strategy", "ts"),
     )
