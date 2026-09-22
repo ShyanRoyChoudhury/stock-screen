@@ -150,12 +150,13 @@ export default function SymbolPage() {
   const singleOpenLotWithEval = openLots.length === 1 && openLots[0].latest_evaluation ? openLots[0] : null
   const levels: ChartLevel[] | undefined = selSig ? undefined : singleOpenLotWithEval ? posLevels(singleOpenLotWithEval) : undefined
 
-  // rows = event signals (or the selected Confluence row) + at most 12 other
-  // Confluence rows, dimmed. Plain computation (not useMemo): both early returns
-  // above happen before any hook in this component, so nothing here may call one.
+  // rows = event signals (or the selected Confluence row); with "Include
+  // Confluence" on, also the Confluence rows (dimmed), so the toggle governs the
+  // panel as well as the chart markers. Plain computation (not useMemo): both
+  // early returns above happen before any hook in this component.
   const tableRows: Signal[] = [
     ...sigs.filter((s) => s.strategy !== 'Confluence' || s === selSig),
-    ...sigs.filter((s) => s.strategy === 'Confluence' && s !== selSig).slice(0, 12),
+    ...(toggles.showConfluence ? sigs.filter((s) => s.strategy === 'Confluence' && s !== selSig) : []),
   ]
 
   const signalCols: Column<Signal>[] = [
