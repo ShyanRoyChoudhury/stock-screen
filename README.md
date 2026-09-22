@@ -15,6 +15,8 @@ docker compose up -d            # Postgres 16 on localhost:5433
 .venv/bin/uvicorn app.main:app --port 8000
 ```
 
+For day-to-day operation (env, backups, scripts, every endpoint, troubleshooting), see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
 ## Typical flow
 
 ```bash
