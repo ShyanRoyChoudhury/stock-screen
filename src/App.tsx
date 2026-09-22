@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react'
 import { Route, Routes } from 'react-router'
 import { Shell } from './components/Shell'
-import { Loading } from './components/Loading'
+import { Loading } from './ds'
 
 const TodayPage = lazy(() => import('./pages/today'))
 const SignalsPage = lazy(() => import('./pages/signals'))

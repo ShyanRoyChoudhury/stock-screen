@@ -1,54 +1,83 @@
-// Reads chart colours from the design-token CSS variables (never hard-coded),
-// and notifies callers when the active theme changes so charts can recolour.
-// See BUILD_BRIEF.md "Design tokens" and the task's chart colour rules.
+// Reads chart colours from the vendored design system's CSS token variables
+// (design/design-system/tokens.css, loaded via src/ds/tokens.css) — never
+// hard-coded. See BUILD_BRIEF.md "Design tokens" and the Deliverable 1 task
+// spec for the exact variable names the chart must read.
 
 export interface ChartTokens {
   bg: string
-  surface2: string
-  border: string
-  text: string
+  grid: string
   muted: string
+  line: string
+  ink: string
   accent: string
   up: string
   down: string
-  warn: string
-  exit: string
-  partial: string
-  review: string
-  hold: string
+  volumeUp: string
+  volumeDown: string
+  ema50: string
+  ema200: string
+  bbBand: string
+  kcBand: string
+  macdLine: string
+  macdSignal: string
+  levelEntry: string
+  levelStop: string
+  levelTrail: string
+  levelTarget: string
+  markerAction: string
+  markerDemerger: string
 }
 
 const VAR_MAP: Record<keyof ChartTokens, string> = {
-  bg: '--color-surface',
-  surface2: '--color-surface-2',
-  border: '--color-border',
-  text: '--color-text',
-  muted: '--color-muted',
-  accent: '--color-accent',
-  up: '--color-up',
-  down: '--color-down',
-  warn: '--color-warn',
-  exit: '--color-exit',
-  partial: '--color-partial',
-  review: '--color-review',
-  hold: '--color-hold',
+  bg: '--surface-sunken',
+  grid: '--chart-grid',
+  muted: '--ink-muted',
+  line: '--line',
+  ink: '--ink',
+  accent: '--accent',
+  up: '--candle-up',
+  down: '--candle-down',
+  volumeUp: '--volume-up',
+  volumeDown: '--volume-down',
+  ema50: '--ema-50',
+  ema200: '--ema-200',
+  bbBand: '--bb-band',
+  kcBand: '--kc-band',
+  macdLine: '--macd-line',
+  macdSignal: '--macd-signal',
+  levelEntry: '--level-entry',
+  levelStop: '--level-stop',
+  levelTrail: '--level-trail',
+  levelTarget: '--level-target',
+  markerAction: '--marker-action',
+  markerDemerger: '--marker-demerger',
 }
 
-// Light-theme fallbacks, only used if a variable somehow resolves empty (e.g. in tests).
+// Dark-theme fallbacks (tokens.css dark values), only used if a variable somehow
+// resolves empty (e.g. in tests without the stylesheet loaded).
 const FALLBACK: ChartTokens = {
-  bg: '#ffffff',
-  surface2: '#eef0f3',
-  border: '#d9dde3',
-  text: '#14171c',
-  muted: '#5b6470',
-  accent: '#2563eb',
-  up: '#15803d',
-  down: '#dc2626',
-  warn: '#b45309',
-  exit: '#dc2626',
-  partial: '#d97706',
-  review: '#7c3aed',
-  hold: '#64748b',
+  bg: '#07090d',
+  grid: '#1a2029',
+  muted: '#9ba5b4',
+  line: '#232a35',
+  ink: '#e7eaf0',
+  accent: '#5aa9ff',
+  up: '#3ecf8e',
+  down: '#ff6b6b',
+  volumeUp: '#1f5a41',
+  volumeDown: '#6a2a2f',
+  ema50: '#f2b33d',
+  ema200: '#e879c9',
+  bbBand: '#7f95ff',
+  kcBand: '#43c6c6',
+  macdLine: '#5aa9ff',
+  macdSignal: '#ff9a4d',
+  levelEntry: '#e7eaf0',
+  levelStop: '#ff6b6b',
+  levelTrail: '#ff9a4d',
+  levelTarget: '#3ecf8e',
+  markerAction: '#9ba5b4',
+  markerDemerger: '#b9a2ff',
 }
 
 /** Reads the current values of the design-token CSS variables from <html>. */

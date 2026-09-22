@@ -2,6 +2,7 @@
 // see the final report for why (page builders only own their own pages/<x>/ folder).
 
 import { istDateKey } from '../../lib/format'
+import type { IngestRun, Position, RunMode, Verdict } from '../../api/types'
 
 /** m:ss duration between two ISO timestamps. '—' when not finished or invalid. */
 export function formatDuration(startedAt: string, finishedAt: string | null): string {
@@ -69,4 +70,41 @@ export function expectedSyncDate(now: Date = new Date()): string {
   let key = plusDaysKey(todayKey, -1)
   while (!isWeekdayKey(key)) key = plusDaysKey(key, -1)
   return key
+}
+
+// ---------------------------------------------------------------------------
+// Verdict ordering + fallback (BUILD_BRIEF: "last_verdict ?? latest_evaluation.verdict")
+// ---------------------------------------------------------------------------
+
+/** EXIT -> PARTIAL -> REVIEW -> HOLD, the order actionable positions/stat tiles read in. */
+export const VERDICT_ORDER: Record<Verdict, number> = { EXIT: 0, PARTIAL: 1, REVIEW: 2, HOLD: 3 }
+
+/** A position's effective verdict for grouping/sorting: last_verdict, falling back to the latest evaluation's. */
+export function verdictOf(p: Position): Verdict {
+  return p.last_verdict ?? p.latest_evaluation?.verdict ?? 'HOLD'
+}
+
+// ---------------------------------------------------------------------------
+// Runs
+// ---------------------------------------------------------------------------
+
+/** Runs are newest-first per the API contract, so the first match per mode set is the latest run for it. */
+export function latestForModes(runs: IngestRun[], modes: RunMode[]): IngestRun | undefined {
+  return runs.find((r) => modes.includes(r.mode))
+}
+
+// ---------------------------------------------------------------------------
+// Trading sessions (prototype's sessionsUntil, app.jsx line ~62)
+// ---------------------------------------------------------------------------
+
+/** Count of Mon-Fri calendar dates strictly between two YYYY-MM-DD keys (exclusive of `from`, inclusive of `to`). */
+export function sessionsUntil(from: string, to: string): number {
+  let n = 0
+  let key = from
+  while (key < to) {
+    key = plusDaysKey(key, 1)
+    const wd = new Date(`${key}T00:00:00Z`).getUTCDay()
+    if (wd !== 0 && wd !== 6) n++
+  }
+  return n
 }

@@ -1,46 +1,78 @@
-// Signals (the scanner). Handoff §5.2.
+// Signals (the scanner). Structure per design/prototype/src/app.jsx lines
+// 146-210 (Signals), rebuilt on the vendored design system.
 
-import { useMemo } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { useMemo, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router'
 import { useFreshSignals, useSymbols } from '../../api/hooks'
-import type { Signal, Symbol as SymbolRow, Timeframe } from '../../api/types'
-import { STRATEGY_BY_KEY, industriesFrom } from '../../lib/domain'
+import type { Signal, Timeframe } from '../../api/types'
 import { useSettings } from '../../lib/settings'
-import { fmtIstDate, fmtIstDateTime, fmtNum, fmtPct, rr } from '../../lib/format'
-import { DataTable, type DataTableColumn } from '../../components/DataTable'
-import { Chip } from '../../components/Chip'
-import { Loading } from '../../components/Loading'
-import { ErrorState } from '../../components/ErrorState'
-import { EmptyState } from '../../components/EmptyState'
-import { FilterBar } from './FilterBar'
-import { SummaryStrip } from './SummaryStrip'
-import { SignalDetails } from './SignalDetails'
-import { detailsSummary, readStr } from './details'
-import { parseDays, parseMode, parseStrategies, parseTimeframe, serializeStrategies, strategiesForMode, type SignalMode } from './url'
+import { istDateKey } from '../../lib/format'
+import {
+  Badge,
+  Banner,
+  Button,
+  DataTable,
+  EmptyState,
+  ErrorState,
+  Loading,
+  Menu,
+  Num,
+  PageHead,
+  RiskPct,
+  StrategyTag,
+  Tabs,
+  TimeframeBadge,
+  fmt,
+  type Column,
+  type TabItem,
+} from '../../ds'
+import { readStr } from './details'
+import { SignalDetail } from './SignalDetail'
+import {
+  CONVICTION_OPTIONS,
+  EVENT_STRATEGIES,
+  FRESH_DAY_OPTIONS,
+  MAX_RISK_OPTIONS,
+  MIN_RR_OPTIONS,
+  parseDays,
+  parseNumberOption,
+  parseStrategies,
+  parseTab,
+  parseTimeframe,
+} from './url'
 
-function num(n: string): number | null {
-  if (n === '') return null
-  const v = Number(n)
-  return Number.isFinite(v) ? v : null
+function dayKey(ts: string): string {
+  return ts.slice(0, 10)
+}
+
+/** Always client-side (BUILD_BRIEF: "rr_ratio exists only for some strategies.
+ * Compute R:R with fmt.rr for every row"), matching the footer's own claim. */
+function rrOf(s: Signal): number | null {
+  return fmt.rr(s.entry, s.stop_loss, s.target_1)
+}
+
+function convictionExtra(s: Signal): string | null {
+  const c = readStr(s.details, 'conviction')
+  return c ? c.replace(' ⚡', '⚡') : null
 }
 
 export default function SignalsPage() {
   const { settings } = useSettings()
   const [params, setParams] = useSearchParams()
+  const navigate = useNavigate()
 
   const allowedTimeframes: Timeframe[] = settings.showIntraday ? ['1d', '4h', '1h'] : ['1d']
-
-  const mode = parseMode(params.get('mode'))
+  const tab = parseTab(params.get('tab'))
   const timeframe = parseTimeframe(params.get('tf'), allowedTimeframes, settings.defaultTimeframe)
   const days = parseDays(params.get('days'))
-  const modeStrategies = strategiesForMode(mode)
-  const selectedStrategies = parseStrategies(params.get('strategies'), modeStrategies)
-  const industry = params.get('industry') ?? ''
-  const maxRisk = params.get('maxRisk') ?? ''
-  const minRR = params.get('minRR') ?? ''
-  const conviction = params.get('conviction') ?? ''
-  const entryMode = params.get('entryMode') ?? ''
-  const q = params.get('q') ?? ''
+  const strategies = parseStrategies(params.get('strategies'))
+  const industry = params.get('industry')
+  const maxRisk = parseNumberOption(params.get('maxRisk'), MAX_RISK_OPTIONS)
+  const minRR = parseNumberOption(params.get('minRR'), MIN_RR_OPTIONS)
+  const conviction = params.get('conviction')
+  const entryMode = params.get('entryMode')
+
+  const [limit, setLimit] = useState(100)
 
   function patch(next: Record<string, string | null>) {
     setParams(
@@ -56,201 +88,227 @@ export default function SignalsPage() {
     )
   }
 
-  const freshQuery = useFreshSignals({ days, timeframe })
+  function resetFilters() {
+    patch({ strategies: null, industry: null, maxRisk: null, minRR: null, conviction: null, entryMode: null })
+  }
+
+  // /signals/fresh's `days` is a wall-clock window (now - N days), not calendar-date
+  // based, so a tight window is often empty until the evening job has produced
+  // today's bar. Widen the request by 2 days, then trim client-side to the last
+  // `days` distinct IST session dates actually present in the response.
+  const freshQuery = useFreshSignals({ days: days + 2, timeframe })
   const symbolsQuery = useSymbols()
 
   const symbolMap = useMemo(() => {
-    const m = new Map<string, SymbolRow>()
-    for (const s of symbolsQuery.data ?? []) m.set(s.symbol, s)
+    const m = new Map(symbolsQuery.data?.map((s) => [s.symbol, s]) ?? [])
     return m
   }, [symbolsQuery.data])
 
-  const industries = useMemo(() => industriesFrom(symbolsQuery.data ?? []), [symbolsQuery.data])
+  const industries = useMemo(() => {
+    const set = new Set<string>()
+    for (const s of symbolsQuery.data ?? []) if (s.industry) set.add(s.industry)
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [symbolsQuery.data])
 
   const allSignals = useMemo(() => freshQuery.data ?? [], [freshQuery.data])
 
-  // Confluence fires on ~23% of bars; used to badge "confirms" on Event-mode rows
-  // for the same symbol+bar, without letting Confluence itself dominate the table.
+  const sessionDateSet = useMemo(() => {
+    const set = new Set<string>()
+    for (const s of allSignals) {
+      const k = istDateKey(s.ts)
+      if (k) set.add(k)
+    }
+    return new Set(Array.from(set).sort().slice(-days))
+  }, [allSignals, days])
+
+  const inWindow = useMemo(
+    () => allSignals.filter((s) => {
+      const k = istDateKey(s.ts)
+      return k !== null && sessionDateSet.has(k)
+    }),
+    [allSignals, sessionDateSet],
+  )
+
+  const nEvent = inWindow.filter((s) => s.strategy !== 'Confluence').length
+  const nState = inWindow.length - nEvent
+
+  // Confluence rows badge the same symbol+bar's event rows with "+CONF"; any Confluence
+  // signal for that bar was fetched by this same query, so deriving from inWindow (rather
+  // than an unbounded all-time signals fetch) is both correct and cheap.
   const confluenceKeys = useMemo(() => {
     const set = new Set<string>()
-    for (const s of allSignals) if (s.strategy === 'Confluence') set.add(`${s.symbol}|${s.ts}`)
+    for (const s of inWindow) if (s.strategy === 'Confluence') set.add(s.symbol + dayKey(s.ts))
     return set
-  }, [allSignals])
+  }, [inWindow])
 
-  const filtered = useMemo(() => {
-    const maxRiskNum = num(maxRisk)
-    const minRRNum = num(minRR)
-    const qLower = q.trim().toLowerCase()
-    const selectedSet = new Set(selectedStrategies)
-    return allSignals.filter((s) => {
-      if (!selectedSet.has(s.strategy)) return false
-      if (industry) {
-        const sym = symbolMap.get(s.symbol)
-        if ((sym?.industry ?? '') !== industry) return false
-      }
-      if (maxRiskNum !== null && s.risk_pct !== null && s.risk_pct > maxRiskNum) return false
-      if (minRRNum !== null) {
-        const rrVal = s.rr_ratio ?? rr(s.entry, s.stop_loss, s.target_1)
-        if (rrVal === null || rrVal < minRRNum) return false
-      }
-      if (conviction && s.strategy === 'Confluence') {
-        const c = readStr(s.details, 'conviction') ?? ''
-        if (!c.startsWith(conviction)) return false
-      }
-      if (entryMode && s.strategy === 'PIPELINE') {
-        if (s.entry_mode !== entryMode) return false
-      }
-      if (qLower) {
-        const sym = symbolMap.get(s.symbol)
-        const haystack = `${s.symbol} ${sym?.name ?? ''}`.toLowerCase()
-        if (!haystack.includes(qLower)) return false
-      }
-      return true
-    })
-  }, [allSignals, selectedStrategies, industry, maxRisk, minRR, conviction, entryMode, q, symbolMap])
+  const rows = useMemo(
+    () =>
+      inWindow
+        .filter((s) => (tab === 'state' ? s.strategy === 'Confluence' : s.strategy !== 'Confluence'))
+        .filter((s) => !strategies.length || strategies.includes(s.strategy))
+        .filter((s) => !industry || symbolMap.get(s.symbol)?.industry === industry)
+        .filter((s) => maxRisk == null || (s.risk_pct != null && s.risk_pct <= maxRisk))
+        .filter((s) => minRR == null || (rrOf(s) ?? -1) >= minRR)
+        .filter((s) => !conviction || (readStr(s.details, 'conviction') ?? '').startsWith(conviction))
+        .filter((s) => !entryMode || s.entry_mode === entryMode),
+    [inWindow, tab, strategies, industry, maxRisk, minRR, conviction, entryMode, symbolMap],
+  )
 
-  const columns: DataTableColumn<Signal>[] = [
+  const timeframeTabs: TabItem[] = [
+    { id: '1d', label: '1d' },
+    ...(settings.showIntraday ? [{ id: '4h', label: '4h', experimental: true }, { id: '1h', label: '1h', experimental: true }] : []),
+  ]
+
+  const cols: Column<Signal>[] = [
     {
       key: 'symbol',
-      header: 'Symbol',
+      label: 'Symbol',
+      sortable: true,
       sortValue: (s) => s.symbol,
       render: (s) => (
-        <Link to={`/symbols/${s.symbol}?tf=${s.timeframe}`} className="font-medium text-accent hover:underline">
-          {s.symbol}
-        </Link>
-      ),
-    },
-    {
-      key: 'name',
-      header: 'Name',
-      sortValue: (s) => symbolMap.get(s.symbol)?.name ?? '',
-      render: (s) => symbolMap.get(s.symbol)?.name ?? '—',
-    },
-    {
-      key: 'industry',
-      header: 'Industry',
-      sortValue: (s) => symbolMap.get(s.symbol)?.industry ?? '',
-      render: (s) => symbolMap.get(s.symbol)?.industry ?? '—',
-    },
-    {
-      key: 'strategy',
-      header: 'Strategy',
-      sortValue: (s) => STRATEGY_BY_KEY[s.strategy].label,
-      render: (s) => (
-        <span className="inline-flex items-center gap-1">
-          <Chip variant="strategy" value={s.strategy} />
-          {mode === 'event' && confluenceKeys.has(`${s.symbol}|${s.ts}`) && (
-            <Chip variant="neutral" title="A Confluence signal also fired for this symbol on this bar">
-              confirms
-            </Chip>
-          )}
+        <span className="app-row" style={{ gap: 6 }}>
+          <button
+            type="button"
+            className="app-link ss-sym"
+            onClick={(e) => {
+              e.stopPropagation()
+              navigate(`/symbols/${s.symbol}?sig=${s.strategy}@${dayKey(s.ts)}`)
+            }}
+          >
+            {s.symbol}
+          </button>
+          {s.strategy !== 'Confluence' && confluenceKeys.has(s.symbol + dayKey(s.ts)) ? (
+            <Badge title="A Confluence state holds on the same bar">+CONF</Badge>
+          ) : null}
         </span>
       ),
     },
-    { key: 'tf', header: 'TF', align: 'center', sortValue: (s) => s.timeframe, render: (s) => s.timeframe.toUpperCase() },
+    { key: 'name', label: 'Name', render: (s) => <span className="ss-muted app-trunc">{symbolMap.get(s.symbol)?.name}</span> },
     {
-      key: 'date',
-      header: 'Date',
-      align: 'right',
-      sortValue: (s) => s.ts,
-      render: (s) => <span className="num">{s.timeframe === '1d' ? fmtIstDate(s.ts) : fmtIstDateTime(s.ts)}</span>,
+      key: 'industry',
+      label: 'Industry',
+      sortable: true,
+      sortValue: (s) => symbolMap.get(s.symbol)?.industry ?? '',
+      render: (s) => <span className="ss-muted app-trunc app-trunc-s">{symbolMap.get(s.symbol)?.industry}</span>,
     },
-    { key: 'entry', header: 'Entry', align: 'right', sortValue: (s) => s.entry, render: (s) => <span className="num">{fmtNum(s.entry)}</span> },
-    { key: 'stop', header: 'Stop', align: 'right', sortValue: (s) => s.stop_loss, render: (s) => <span className="num">{fmtNum(s.stop_loss)}</span> },
     {
-      key: 'risk',
-      header: 'Risk %',
-      align: 'right',
-      sortValue: (s) => s.risk_pct ?? -Infinity,
-      render: (s) => {
-        const cls = s.risk_pct !== null && s.risk_pct > 12 ? 'text-exit' : s.risk_pct !== null && s.risk_pct > 8 ? 'text-warn' : ''
-        return <span className={`num ${cls}`}>{fmtPct(s.risk_pct)}</span>
-      },
+      key: 'strategy',
+      label: 'Strategy',
+      sortable: true,
+      sortValue: (s) => s.strategy,
+      render: (s) => <StrategyTag strategy={s.strategy} extra={s.entry_mode || convictionExtra(s)} />,
     },
-    { key: 't1', header: 'T1', align: 'right', sortValue: (s) => s.target_1, render: (s) => <span className="num">{fmtNum(s.target_1)}</span> },
-    { key: 't2', header: 'T2', align: 'right', sortValue: (s) => s.target_2, render: (s) => <span className="num">{fmtNum(s.target_2)}</span> },
+    { key: 'tf', label: 'TF', render: (s) => <TimeframeBadge timeframe={s.timeframe} /> },
+    { key: 'ts', label: 'Signal date', sortable: true, sortValue: (s) => s.ts, render: (s) => <span className="ss-n">{fmt.date(s.ts)}</span> },
+    { key: 'entry', label: 'Entry ₹', align: 'right', sortable: true, sortValue: (s) => s.entry, render: (s) => <Num value={s.entry} /> },
+    { key: 'stop_loss', label: 'Stop', align: 'right', render: (s) => <Num value={s.stop_loss} /> },
+    { key: 'risk_pct', label: 'Risk %', align: 'right', sortable: true, sortValue: (s) => s.risk_pct ?? -Infinity, render: (s) => <RiskPct value={s.risk_pct} /> },
+    { key: 'target_1', label: 'T1', align: 'right', render: (s) => <Num value={s.target_1} /> },
+    { key: 'target_2', label: 'T2', align: 'right', render: (s) => <Num value={s.target_2} /> },
     {
       key: 'rr',
-      header: 'R:R',
+      label: 'R:R',
       align: 'right',
-      sortValue: (s) => s.rr_ratio ?? rr(s.entry, s.stop_loss, s.target_1) ?? -Infinity,
+      sortable: true,
+      sortValue: (s) => rrOf(s) ?? -Infinity,
+      title: '(T1 − entry) / (entry − stop), computed client-side',
       render: (s) => {
-        const v = s.rr_ratio ?? rr(s.entry, s.stop_loss, s.target_1)
-        return <span className="num">{v === null ? '—' : v.toFixed(2)}</span>
+        const v = rrOf(s)
+        return <Num kind="rr" value={v} className={v != null && v < 1 ? 'ss-muted' : ''} />
       },
-    },
-    {
-      key: 'details',
-      header: 'Details',
-      width: 160,
-      sortValue: (s) => detailsSummary(s),
-      render: (s) => <span className="inline-block min-w-[160px] whitespace-nowrap">{detailsSummary(s)}</span>,
     },
   ]
 
-  const emptyReason = 'No signals match. Try widening the freshness window or clearing filters.'
-
   return (
-    // min-w-0 keeps this flex child from stretching to the width of its content (the
-    // signals table can get wide); without it, the table's own overflow-x-auto never
-    // engages and the whole page scrolls horizontally instead of just the table region.
-    <div className="flex min-w-0 flex-col gap-3">
-      <div>
-        <h1 className="text-lg font-semibold">Signals</h1>
-        <p className="text-sm text-muted">Browse and shortlist setups from the scanner.</p>
+    <div className="ss-page">
+      <PageHead title="Signals" sub={`${rows.length} setups · last ${days} session${days > 1 ? 's' : ''} · ${timeframe}`}>
+        <Tabs variant="segmented" ariaLabel="Timeframe" value={timeframe} onChange={(tf) => patch({ tf: tf === '1d' ? null : tf })} items={timeframeTabs} />
+      </PageHead>
+
+      <Tabs
+        value={tab}
+        onChange={(t) => patch({ tab: t === 'event' ? null : t })}
+        ariaLabel="Signal type"
+        items={[
+          { id: 'event', label: 'Event signals', count: nEvent },
+          { id: 'state', label: 'Confluence', count: nState, title: 'A state, not an event: fires on ~23% of daily bars' },
+        ]}
+      />
+
+      <div className="app-filters">
+        <Menu label="Fresh" value={days} onChange={(d) => patch({ days: d === 3 ? null : String(d) })} options={FRESH_DAY_OPTIONS.map((d) => ({ value: d, label: `≤ ${d} session${d > 1 ? 's' : ''}` }))} />
+        {tab === 'event' ? (
+          <Menu
+            label="Strategy"
+            multi
+            value={strategies}
+            onChange={(next) => patch({ strategies: next.length ? next.join(',') : null })}
+            onClear={() => patch({ strategies: null })}
+            options={EVENT_STRATEGIES.map((k) => ({ value: k, label: k, count: inWindow.filter((s) => s.strategy === k).length }))}
+          />
+        ) : null}
+        <Menu label="Industry" value={industry} onChange={(v) => patch({ industry: v })} onClear={() => patch({ industry: null })} options={industries.map((i) => ({ value: i, label: i }))} />
+        <Menu label="Max risk" value={maxRisk} onChange={(v) => patch({ maxRisk: String(v) })} onClear={() => patch({ maxRisk: null })} options={MAX_RISK_OPTIONS.map((v) => ({ value: v, label: `≤ ${v}%` }))} />
+        <Menu label="Min R:R" value={minRR} onChange={(v) => patch({ minRR: String(v) })} onClear={() => patch({ minRR: null })} options={MIN_RR_OPTIONS.map((v) => ({ value: v, label: `≥ ${v.toFixed(1)}` }))} />
+        {tab === 'state' ? (
+          <Menu label="Conviction" value={conviction} onChange={(v) => patch({ conviction: v })} onClear={() => patch({ conviction: null })} options={CONVICTION_OPTIONS.map((v) => ({ value: v, label: v }))} />
+        ) : null}
+        {tab === 'event' && (!strategies.length || strategies.includes('PIPELINE')) ? (
+          <Menu
+            label="Entry mode"
+            value={entryMode}
+            onChange={(v) => patch({ entryMode: v })}
+            onClear={() => patch({ entryMode: null })}
+            options={[
+              { value: 'IMMEDIATE', label: 'IMMEDIATE' },
+              { value: 'RETEST', label: 'RETEST' },
+            ]}
+          />
+        ) : null}
+        <span className="ss-spacer" />
+        <Button size="sm" variant="ghost" onClick={resetFilters}>
+          Reset filters
+        </Button>
       </div>
 
-      <FilterBar
-        mode={mode}
-        onModeChange={(m: SignalMode) => patch({ mode: m === 'event' ? null : m, strategies: null })}
-        timeframe={timeframe}
-        onTimeframeChange={(tf) => patch({ tf: tf === settings.defaultTimeframe ? null : tf })}
-        allowedTimeframes={allowedTimeframes}
-        days={days}
-        onDaysChange={(d) => patch({ days: d === 3 ? null : String(d) })}
-        modeStrategies={modeStrategies}
-        selectedStrategies={selectedStrategies}
-        onToggleStrategy={(strategy) => {
-          const set = new Set(selectedStrategies)
-          if (set.has(strategy)) set.delete(strategy)
-          else set.add(strategy)
-          const next = modeStrategies.filter((s) => set.has(s))
-          patch({ strategies: serializeStrategies(next.length ? next : modeStrategies, modeStrategies) })
-        }}
-        industry={industry}
-        onIndustryChange={(v) => patch({ industry: v || null })}
-        industries={industries}
-        maxRisk={maxRisk}
-        onMaxRiskChange={(v) => patch({ maxRisk: v || null })}
-        minRR={minRR}
-        onMinRRChange={(v) => patch({ minRR: v || null })}
-        conviction={conviction}
-        onConvictionChange={(v) => patch({ conviction: v || null })}
-        entryMode={entryMode}
-        onEntryModeChange={(v) => patch({ entryMode: v || null })}
-        q={q}
-        onQChange={(v) => patch({ q: v || null })}
-      />
+      {timeframe !== '1d' ? (
+        <Banner tone="review" title={`${timeframe} is experimental`}>
+          The Yahoo hourly feed doesn’t reconcile with daily bars and ~13% of hourly bars have zero volume. Don’t trade these off this feed.
+        </Banner>
+      ) : null}
 
       {freshQuery.isLoading || symbolsQuery.isLoading ? (
         <Loading label="Loading signals…" />
       ) : freshQuery.isError ? (
         <ErrorState error={freshQuery.error} title="Could not load signals" />
+      ) : rows.length === 0 ? (
+        <EmptyState title="No signals match">Try widening the freshness window or clearing filters.</EmptyState>
       ) : (
-        <>
-          <SummaryStrip signals={filtered} strategies={modeStrategies} />
-          {filtered.length === 0 ? (
-            <EmptyState title="No signals match" message={emptyReason} />
-          ) : (
-            <DataTable
-              columns={columns}
-              rows={filtered}
-              rowKey={(s) => `${s.symbol}|${s.strategy}|${s.timeframe}|${s.ts}`}
-              expandable={(s) => <SignalDetails signal={s} />}
-              pageSize={100}
-            />
-          )}
-        </>
+        <DataTable
+          key={tab + timeframe}
+          ariaLabel="Signals"
+          density={settings.density}
+          columns={cols}
+          rows={rows.slice(0, limit)}
+          rowKey={(s) => `${s.symbol}|${s.strategy}|${s.ts}`}
+          initialSort={{ key: 'ts', dir: 'desc' }}
+          rowClassName={(s) => (s.strategy === 'Confluence' && tab !== 'state' ? 'ss-dim' : undefined)}
+          renderExpanded={(s) => <SignalDetail signal={s} symbolName={symbolMap.get(s.symbol)?.name ?? undefined} />}
+          footer={
+            <>
+              <span>
+                {Math.min(limit, rows.length)} of {rows.length} shown
+              </span>
+              {rows.length > limit ? (
+                <Button size="sm" variant="ghost" onClick={() => setLimit((l) => l + 200)}>
+                  Show 200 more
+                </Button>
+              ) : null}
+              <span className="ss-spacer" />
+              <span className="app-hide-sm">R:R computed client-side · ↑↓ / j k move · ↵ expand</span>
+            </>
+          }
+        />
       )}
     </div>
   )

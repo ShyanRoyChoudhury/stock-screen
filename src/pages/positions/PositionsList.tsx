@@ -1,462 +1,345 @@
-// Positions list — handoff §5.4. Tabs Open/Closed (?status=), group-by-symbol
-// toggle, header stat row, Re-evaluate action, wide table + narrow card list.
+// Positions list — BUILD_BRIEF "Deliverable 1", mirroring
+// design/prototype/src/app.jsx:314-386 (Positions). Three tabs (open lots /
+// by symbol / closed), verdict+symbol filters on the open tab, all state
+// mirrored to the URL.
 
-import { useMemo, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router'
-import { usePositions, useEvaluatePositions } from '../../api/hooks'
-import { useSettings } from '../../lib/settings'
-import { fmtInr, fmtFrac, fmtIstDate, fmtNum, signedClass } from '../../lib/format'
-import { reasonLabel } from '../../lib/domain'
+import { Fragment, useMemo, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router'
+import { useEvaluatePositions, usePositions } from '../../api/hooks'
 import type { Position, Verdict } from '../../api/types'
-import { DataTable, type DataTableColumn } from '../../components/DataTable'
-import { Chip } from '../../components/Chip'
-import { Panel } from '../../components/Panel'
-import { Stat } from '../../components/Stat'
-import { Toggle } from '../../components/Toggle'
-import { Button } from '../../components/Button'
-import { Dialog } from '../../components/Dialog'
-import { EmptyState } from '../../components/EmptyState'
-import { ErrorState } from '../../components/ErrorState'
-import { Loading } from '../../components/Loading'
-import { ApiKeyPrompt } from '../../components/ApiKeyPrompt'
-import { ReasonsInline, WarningsBadge, AvgEntryCell, MatchCell } from './cells'
 import {
-  VERDICT_PRECEDENCE,
-  verdictRank,
-  positionVerdict,
-  sortByVerdict,
-  unrealizedInr,
-  groupBySymbol,
-  winRate,
-  maxEvaluatedOn,
-  daysBetween,
-  type SymbolGroup,
-} from './helpers'
+  ApiKeyPrompt,
+  Badge,
+  Button,
+  CodeList,
+  type Column,
+  DataTable,
+  EmptyState,
+  ErrorState,
+  Loading,
+  Menu,
+  Num,
+  PageHead,
+  Panel,
+  StrategyTag,
+  Tabs,
+  VerdictChip,
+  fmt,
+} from '../../ds'
+import { useSettings } from '../../lib/settings'
+import { useToast } from '../../lib/toast'
+import { AsPaidCell, MatchCell } from './cells'
+import { VORDER, errorMessage, groupBySymbol, groupByStrategy, maxEvaluatedOn, unrlInr, type SymbolGroup } from './helpers'
 
-type Status = 'open' | 'closed'
+type Tab = 'open' | 'sym' | 'closed'
+
+function isTab(v: string | null): v is Tab {
+  return v === 'open' || v === 'sym' || v === 'closed'
+}
 
 export function PositionsList() {
   const { settings } = useSettings()
   const navigate = useNavigate()
+  const toast = useToast()
   const [searchParams, setSearchParams] = useSearchParams()
-  const status: Status = searchParams.get('status') === 'closed' ? 'closed' : 'open'
-  const [grouped, setGrouped] = useState(false)
-  const [evaluateOpen, setEvaluateOpen] = useState(false)
 
-  const { data: positions, isLoading, isError, error, refetch } = usePositions(status)
+  const { data: positions, isLoading, isError, error } = usePositions()
+  const evaluateMutation = useEvaluatePositions()
 
-  function setStatus(next: Status) {
+  const tabParam = searchParams.get('tab')
+  const [tab, setTab] = useState<Tab>(isTab(tabParam) ? tabParam : settings.positionsDefault === 'sym' ? 'sym' : 'open')
+  const [verdictFilter, setVerdictFilter] = useState<Verdict | null>((searchParams.get('verdict') as Verdict) || null)
+  const [symbolFilter, setSymbolFilter] = useState<string | null>(searchParams.get('symbol') || null)
+
+  function updateParams(next: Record<string, string | null>) {
     setSearchParams((prev) => {
       const p = new URLSearchParams(prev)
-      p.set('status', next)
+      for (const [k, v] of Object.entries(next)) {
+        if (v) p.set(k, v)
+        else p.delete(k)
+      }
       return p
     })
   }
 
-  const sorted = useMemo(() => sortByVerdict(positions ?? []), [positions])
-  const groups = useMemo(() => groupBySymbol(sorted), [sorted])
+  function changeTab(id: string) {
+    setTab(id as Tab)
+    updateParams({ tab: id })
+  }
+  function changeVerdict(v: Verdict | null) {
+    setVerdictFilter(v)
+    updateParams({ verdict: v })
+  }
+  function changeSymbol(s: string | null) {
+    setSymbolFilter(s)
+    updateParams({ symbol: s })
+  }
 
-  const verdictCounts = useMemo(() => {
-    const counts: Record<Verdict, number> = { EXIT: 0, PARTIAL: 0, REVIEW: 0, HOLD: 0 }
-    for (const p of sorted) {
-      const v = positionVerdict(p)
-      if (v) counts[v]++
-    }
-    return counts
-  }, [sorted])
+  const all = useMemo(() => positions ?? [], [positions])
+  const open = useMemo(() => all.filter((p) => p.status === 'open'), [all])
+  const closed = useMemo(() => all.filter((p) => p.status === 'closed'), [all])
+  const groups = useMemo(() => groupBySymbol(open), [open])
+  const rows = useMemo(
+    () => open.filter((p) => (!verdictFilter || p.last_verdict === verdictFilter) && (!symbolFilter || p.symbol === symbolFilter)),
+    [open, verdictFilter, symbolFilter],
+  )
+  const sessionDate = useMemo(() => maxEvaluatedOn(open), [open])
+  const strategyStats = useMemo(() => groupByStrategy(closed), [closed])
+  const totalRealized = useMemo(() => closed.reduce((s, p) => s + (p.realized_pnl ?? 0), 0), [closed])
 
-  const totalUnrealized = useMemo(() => sorted.reduce((s, p) => s + (unrealizedInr(p) ?? 0), 0), [sorted])
-  const totalRealized = useMemo(() => sorted.reduce((s, p) => s + (p.realized_pnl ?? 0), 0), [sorted])
-  const rate = useMemo(() => winRate(sorted), [sorted])
-  // "Open lots" here is exactly `sorted` when status === 'open' (the branch this is shown in).
-  const lastEvaluated = useMemo(() => maxEvaluatedOn(sorted), [sorted])
+  function handleReevaluate() {
+    evaluateMutation.mutate(
+      {},
+      {
+        onSuccess: (data) => {
+          const bv = data.by_verdict
+          toast(`${data.evaluated} evaluated · EXIT ${bv.EXIT ?? 0} · PARTIAL ${bv.PARTIAL ?? 0} · REVIEW ${bv.REVIEW ?? 0} · HOLD ${bv.HOLD ?? 0}`)
+        },
+        onError: (err) => toast(errorMessage(err)),
+      },
+    )
+  }
 
   if (!settings.apiKey) return <ApiKeyPrompt message="Positions needs your API key to load your book." />
   if (isLoading) return <Loading label="Loading positions…" />
   if (isError) return <ErrorState error={error} />
 
-  const openColumns: DataTableColumn<Position>[] = [
+  const openColumns: Column<Position>[] = [
     {
       key: 'symbol',
-      header: 'Symbol',
+      label: 'Symbol',
+      sortable: true,
       sortValue: (p) => p.symbol,
       render: (p) => (
-        <Link to={`/symbols/${p.symbol}`} onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">
-          {p.symbol}
-        </Link>
+        <span>
+          <span className="ss-sym">{p.symbol}</span> <span className="ss-faint ss-n app-small">#{p.id}</span>
+        </span>
       ),
     },
     {
       key: 'qty',
-      header: 'Qty',
+      label: 'Qty',
       align: 'right',
-      sortValue: (p) => p.qty_open,
       render: (p) => (
-        <span className="num">
-          {fmtNum(p.qty_open, 0)}/{fmtNum(p.qty_total, 0)}
+        <span className="ss-n">
+          {fmt.qty(p.qty_open)}
+          <span className="ss-faint">/{fmt.qty(p.qty_total)}</span>
         </span>
       ),
     },
-    { key: 'avgEntry', header: 'Avg entry', align: 'right', sortValue: (p) => p.avg_entry_price, render: (p) => <AvgEntryCell position={p} /> },
     {
-      key: 'lastClose',
-      header: 'Last close',
+      key: 'avg',
+      label: 'Avg entry',
       align: 'right',
-      sortValue: (p) => p.latest_evaluation?.close ?? null,
-      render: (p) => <span className="num">{fmtInr(p.latest_evaluation?.close ?? null)}</span>,
+      title: 'Adjusted terms — comparable to the chart',
+      sortValue: (p) => p.avg_entry_price,
+      render: (p) => <Num value={p.avg_entry_price} />,
     },
     {
-      key: 'unrealPct',
-      header: 'Unreal %',
+      key: 'raw',
+      label: 'As paid',
       align: 'right',
+      title: 'What you actually paid; differs only after a split/bonus',
+      render: (p) => <AsPaidCell position={p} />,
+    },
+    { key: 'close', label: 'Last', align: 'right', sortValue: (p) => p.latest_evaluation?.close ?? null, render: (p) => <Num value={p.latest_evaluation?.close ?? null} /> },
+    {
+      key: 'pnl',
+      label: 'Unrl %',
+      align: 'right',
+      sortable: true,
       sortValue: (p) => p.latest_evaluation?.unrealized_pnl_pct ?? null,
-      render: (p) => (
-        <span className={`num ${signedClass(p.latest_evaluation?.unrealized_pnl_pct)}`}>{fmtFrac(p.latest_evaluation?.unrealized_pnl_pct ?? null)}</span>
-      ),
+      render: (p) => <Num kind="frac" value={p.latest_evaluation?.unrealized_pnl_pct ?? null} signed tone="auto" />,
     },
     {
-      key: 'unrealInr',
-      header: 'Unreal ₹',
+      key: 'inr',
+      label: 'Unrl ₹',
       align: 'right',
-      sortValue: (p) => unrealizedInr(p),
-      render: (p) => {
-        const v = unrealizedInr(p)
-        return <span className={`num ${signedClass(v)}`}>{fmtInr(v)}</span>
-      },
+      sortable: true,
+      sortValue: (p) => unrlInr(p),
+      render: (p) => <Num kind="inr" value={unrlInr(p)} signed tone="auto" />,
     },
-    { key: 'daysHeld', header: 'Days', align: 'right', sortValue: (p) => p.latest_evaluation?.days_held ?? null, render: (p) => p.latest_evaluation?.days_held ?? '—' },
-    { key: 'stop', header: 'Stop', align: 'right', sortValue: (p) => p.latest_evaluation?.stop_level ?? null, render: (p) => fmtInr(p.latest_evaluation?.stop_level ?? null) },
-    { key: 'trail', header: 'Trail', align: 'right', sortValue: (p) => p.latest_evaluation?.trail_level ?? null, render: (p) => fmtInr(p.latest_evaluation?.trail_level ?? null) },
-    { key: 't1', header: 'T1', align: 'right', sortValue: (p) => p.latest_evaluation?.target_1 ?? null, render: (p) => fmtInr(p.latest_evaluation?.target_1 ?? null) },
-    { key: 't2', header: 'T2', align: 'right', sortValue: (p) => p.latest_evaluation?.target_2 ?? null, render: (p) => fmtInr(p.latest_evaluation?.target_2 ?? null) },
+    {
+      key: 'days',
+      label: 'Days',
+      align: 'right',
+      sortable: true,
+      sortValue: (p) => p.latest_evaluation?.days_held ?? null,
+      render: (p) => <Num kind="int" value={p.latest_evaluation?.days_held ?? null} />,
+    },
+    { key: 'stop', label: 'Stop', align: 'right', render: (p) => <Num value={p.latest_evaluation?.stop_level ?? null} /> },
+    { key: 'trail', label: 'Trail', align: 'right', render: (p) => <Num value={p.latest_evaluation?.trail_level ?? null} className="ss-muted" /> },
+    { key: 't1', label: 'T1', align: 'right', render: (p) => (p.is_unmatched ? <span className="ss-faint">—</span> : <Num value={p.frozen_target_1} />) },
+    { key: 't2', label: 'T2', align: 'right', render: (p) => (p.is_unmatched ? <span className="ss-faint">—</span> : <Num value={p.frozen_target_2} />) },
     {
       key: 'verdict',
-      header: 'Verdict',
-      sortValue: (p) => verdictRank(positionVerdict(p)),
-      render: (p) => (p.latest_evaluation ? <Chip variant="verdict" value={p.latest_evaluation.verdict} /> : <span className="text-muted">—</span>),
+      label: 'Verdict',
+      sortable: true,
+      sortValue: (p) => VORDER[p.last_verdict ?? 'HOLD'],
+      render: (p) => <VerdictChip verdict={p.last_verdict ?? 'HOLD'} size="sm" />,
     },
-    { key: 'reasons', header: 'Reasons', width: 260, render: (p) => <ReasonsInline reasons={p.latest_evaluation?.reasons ?? []} /> },
-    { key: 'warnings', header: 'Warnings', render: (p) => <WarningsBadge warnings={p.latest_evaluation?.warnings ?? []} /> },
-    { key: 'match', header: 'Match', render: (p) => <MatchCell position={p} /> },
+    { key: 'why', label: 'Reasons · warnings', render: (p) => <CodeList reasons={p.latest_evaluation?.reasons ?? []} warnings={p.latest_evaluation?.warnings ?? []} showLabel={false} /> },
+    { key: 'm', label: 'Matched', render: (p) => <MatchCell position={p} /> },
   ]
 
-  const closedColumns: DataTableColumn<Position>[] = [
-    {
-      key: 'symbol',
-      header: 'Symbol',
-      sortValue: (p) => p.symbol,
-      render: (p) => (
-        <Link to={`/symbols/${p.symbol}`} onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">
-          {p.symbol}
-        </Link>
-      ),
-    },
-    { key: 'opened', header: 'Opened', sortValue: (p) => p.opened_on, render: (p) => fmtIstDate(p.opened_on) },
-    { key: 'closed', header: 'Closed', sortValue: (p) => p.closed_on ?? '', render: (p) => fmtIstDate(p.closed_on) },
-    { key: 'qty', header: 'Qty', align: 'right', sortValue: (p) => p.qty_total, render: (p) => <span className="num">{fmtNum(p.qty_total, 0)}</span> },
-    { key: 'avgEntry', header: 'Avg entry', align: 'right', sortValue: (p) => p.avg_entry_price, render: (p) => <AvgEntryCell position={p} /> },
-    {
-      key: 'realizedInr',
-      header: 'Realised ₹',
-      align: 'right',
-      sortValue: (p) => p.realized_pnl,
-      render: (p) => <span className={`num ${signedClass(p.realized_pnl)}`}>{fmtInr(p.realized_pnl)}</span>,
-    },
-    {
-      key: 'realizedPct',
-      header: 'Realised %',
-      align: 'right',
-      sortValue: (p) => p.realized_pnl_pct,
-      render: (p) => <span className={`num ${signedClass(p.realized_pnl_pct)}`}>{fmtFrac(p.realized_pnl_pct)}</span>,
-    },
-    { key: 'daysHeld', header: 'Days held', align: 'right', render: (p) => (p.closed_on ? daysBetween(p.opened_on, p.closed_on) : '—') },
-    {
-      key: 'match',
-      header: 'Matched strategy',
-      render: (p) => (p.matched_strategy ? <Chip variant="strategy" value={p.matched_strategy} /> : <span className="text-xs text-muted">Unmatched</span>),
-    },
+  const symbolColumns: Column<SymbolGroup>[] = [
+    { key: 'symbol', label: 'Symbol', render: (g) => <span className="ss-sym">{g.symbol}</span> },
+    { key: 'lots', label: 'Lots', align: 'right', render: (g) => <Num kind="int" value={g.lots.length} /> },
+    { key: 'qty', label: 'Qty', align: 'right', render: (g) => <Num kind="qty" value={g.qty} /> },
+    { key: 'avg', label: 'Wtd avg entry', align: 'right', render: (g) => <Num value={g.avg} /> },
+    { key: 'close', label: 'Last', align: 'right', render: (g) => <Num value={g.close ?? null} /> },
+    { key: 'pnl', label: 'Unrl %', align: 'right', render: (g) => <Num kind="frac" value={g.close != null && g.avg ? g.close / g.avg - 1 : null} signed tone="auto" /> },
+    { key: 'inr', label: 'Unrl ₹', align: 'right', render: (g) => <Num kind="inr" value={g.close != null ? g.qty * (g.close - g.avg) : null} signed tone="auto" /> },
+    { key: 'v', label: 'Worst verdict', render: (g) => (g.verdict ? <VerdictChip verdict={g.verdict} size="sm" /> : <span className="ss-faint">—</span>) },
   ]
 
-  const groupColumnsOpen: DataTableColumn<SymbolGroup>[] = [
-    {
-      key: 'symbol',
-      header: 'Symbol',
-      sortValue: (g) => g.symbol,
-      render: (g) => (
-        <Link to={`/symbols/${g.symbol}`} onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">
-          {g.symbol}
-        </Link>
-      ),
-    },
-    { key: 'lots', header: 'Lots', align: 'right', sortValue: (g) => g.lots.length, render: (g) => g.lots.length },
-    {
-      key: 'qty',
-      header: 'Qty',
-      align: 'right',
-      sortValue: (g) => g.qtyOpen,
-      render: (g) => (
-        <span className="num">
-          {fmtNum(g.qtyOpen, 0)}/{fmtNum(g.qtyTotal, 0)}
-        </span>
-      ),
-    },
-    { key: 'avgEntry', header: 'Weighted avg entry', align: 'right', sortValue: (g) => g.weightedAvgEntry, render: (g) => <span className="num">{fmtInr(g.weightedAvgEntry)}</span> },
-    { key: 'lastClose', header: 'Last close', align: 'right', render: (g) => <span className="num">{fmtInr(g.lastClose)}</span> },
-    {
-      key: 'unrealInr',
-      header: 'Unreal ₹',
-      align: 'right',
-      sortValue: (g) => g.unrealizedInr,
-      render: (g) => (
-        <span className={`num ${signedClass(g.unrealizedInr)}`}>{fmtInr(g.unrealizedInr)}</span>
-      ),
-    },
-    {
-      key: 'verdict',
-      header: 'Worst verdict',
-      sortValue: (g) => verdictRank(g.worstVerdict),
-      render: (g) => (g.worstVerdict ? <Chip variant="verdict" value={g.worstVerdict} /> : <span className="text-muted">—</span>),
-    },
+  const closedColumns: Column<Position>[] = [
+    { key: 'symbol', label: 'Symbol', sortable: true, sortValue: (p) => p.symbol, render: (p) => <span className="ss-sym">{p.symbol}</span> },
+    { key: 'opened_on', label: 'Opened', sortable: true, sortValue: (p) => p.opened_on, render: (p) => <span className="ss-n">{fmt.date(p.opened_on)}</span> },
+    { key: 'closed_on', label: 'Closed', sortable: true, sortValue: (p) => p.closed_on ?? '', render: (p) => <span className="ss-n">{p.closed_on ? fmt.date(p.closed_on) : '—'}</span> },
+    { key: 'qty_total', label: 'Qty', align: 'right', render: (p) => <Num kind="qty" value={p.qty_total} /> },
+    { key: 'avg', label: 'Entry', align: 'right', render: (p) => <Num value={p.avg_entry_price} /> },
+    { key: 'realized_pnl', label: 'Realised ₹ (gross)', align: 'right', sortable: true, sortValue: (p) => p.realized_pnl, render: (p) => <Num kind="inr" value={p.realized_pnl} signed tone="auto" /> },
+    { key: 'realized_pnl_pct', label: 'Realised %', align: 'right', sortable: true, sortValue: (p) => p.realized_pnl_pct, render: (p) => <Num kind="frac" value={p.realized_pnl_pct} signed tone="auto" /> },
+    { key: 'strat', label: 'Strategy', render: (p) => (p.matched_strategy ? <StrategyTag strategy={p.matched_strategy} /> : <Badge>Unmatched</Badge>) },
+    { key: 'exit', label: 'Exit on', render: () => <span className="ss-faint">—</span> },
   ]
-
-  const groupColumnsClosed: DataTableColumn<SymbolGroup>[] = [
-    {
-      key: 'symbol',
-      header: 'Symbol',
-      sortValue: (g) => g.symbol,
-      render: (g) => (
-        <Link to={`/symbols/${g.symbol}`} onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">
-          {g.symbol}
-        </Link>
-      ),
-    },
-    { key: 'lots', header: 'Lots', align: 'right', sortValue: (g) => g.lots.length, render: (g) => g.lots.length },
-    { key: 'qty', header: 'Qty total', align: 'right', sortValue: (g) => g.qtyTotal, render: (g) => <span className="num">{fmtNum(g.qtyTotal, 0)}</span> },
-    { key: 'avgEntry', header: 'Weighted avg entry', align: 'right', sortValue: (g) => g.weightedAvgEntry, render: (g) => <span className="num">{fmtInr(g.weightedAvgEntry)}</span> },
-    {
-      key: 'realizedInr',
-      header: 'Realised ₹',
-      align: 'right',
-      sortValue: (g) => g.realizedInr,
-      render: (g) => <span className={`num ${signedClass(g.realizedInr)}`}>{fmtInr(g.realizedInr)}</span>,
-    },
-  ]
-
-  function lotSubRows(lots: Position[]) {
-    return (
-      <div className="flex flex-col gap-1 p-2">
-        {lots.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => navigate(`/positions/${p.id}`)}
-            className="flex items-center justify-between gap-3 rounded border border-border bg-surface px-2 py-1 text-left text-xs hover:bg-surface-2"
-          >
-            <span>
-              #{p.id} · opened {fmtIstDate(p.opened_on)} · qty {fmtNum(p.qty_open, 0)}/{fmtNum(p.qty_total, 0)}
-            </span>
-            <span className="flex items-center gap-2">
-              {p.status === 'open' ? (
-                <span className={`num ${signedClass(p.latest_evaluation?.unrealized_pnl_pct)}`}>{fmtFrac(p.latest_evaluation?.unrealized_pnl_pct ?? null)}</span>
-              ) : (
-                <span className={`num ${signedClass(p.realized_pnl_pct)}`}>{fmtFrac(p.realized_pnl_pct)}</span>
-              )}
-              {p.latest_evaluation && <Chip variant="verdict" value={p.latest_evaluation.verdict} />}
-            </span>
-          </button>
-        ))}
-      </div>
-    )
-  }
-
-  const emptyOpen = status === 'open' && sorted.length === 0
-  const emptyClosed = status === 'closed' && sorted.length === 0
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h1 className="text-lg font-semibold">Positions</h1>
-          <p className="text-sm text-muted">Manage the book: open lots, verdicts, matched strategy, and fills.</p>
-        </div>
-        <Button variant="primary" onClick={() => setEvaluateOpen(true)}>
+    <div className="ss-page">
+      <PageHead title="Positions" sub={`${open.length} open lots · ${groups.length} symbols · as of ${sessionDate ? fmt.date(sessionDate) : '—'}`}>
+        <Button size="sm" icon="sync" loading={evaluateMutation.isPending} onClick={handleReevaluate}>
           Re-evaluate
         </Button>
-      </div>
+      </PageHead>
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border">
-        <div className="flex items-center gap-1">
-          {(['open', 'closed'] as const).map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setStatus(s)}
-              className={`-mb-px border-b-2 px-3 py-1.5 text-sm font-medium ${
-                status === s ? 'border-accent text-text' : 'border-transparent text-muted hover:text-text'
-              }`}
-            >
-              {s === 'open' ? 'Open' : 'Closed'}
-            </button>
-          ))}
-        </div>
-        <div className="pb-1.5">
-          <Toggle checked={grouped} onChange={setGrouped} label="Group by symbol" />
-        </div>
-      </div>
+      <Tabs
+        ariaLabel="Positions"
+        value={tab}
+        onChange={changeTab}
+        items={[
+          { id: 'open', label: 'Open lots', count: open.length },
+          { id: 'sym', label: 'By symbol', count: groups.length },
+          { id: 'closed', label: 'Closed', count: closed.length },
+        ]}
+      />
 
-      {!emptyOpen && !emptyClosed && (
-        <Panel>
-          {status === 'open' ? (
-            <div className="flex flex-col gap-1.5">
-              <div className="flex flex-wrap items-center gap-6">
-                <Stat label="Open lots" value={sorted.length} />
-                <div className="flex flex-col gap-1">
-                  <span className="text-xs text-muted">By verdict</span>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {VERDICT_PRECEDENCE.map((v) => (
-                      <Chip key={v} variant="verdict" value={v}>{`${v} · ${verdictCounts[v]}`}</Chip>
-                    ))}
-                  </div>
-                </div>
-                <Stat label="Total unrealised ₹" value={<span className={signedClass(totalUnrealized)}>{fmtInr(totalUnrealized)}</span>} />
-              </div>
-              <p className="text-xs text-muted">Last evaluated: {lastEvaluated ? fmtIstDate(lastEvaluated) : 'never'}</p>
+      {tab === 'open' ? (
+        open.length === 0 ? (
+          <EmptyState title="No open positions">Buys you place at the broker appear here after the next 16:15 IST sync.</EmptyState>
+        ) : (
+          <>
+            <div className="app-filters">
+              <Menu
+                label="Verdict"
+                value={verdictFilter}
+                onChange={changeVerdict}
+                onClear={() => changeVerdict(null)}
+                options={(['EXIT', 'PARTIAL', 'REVIEW', 'HOLD'] as Verdict[]).map((v) => ({ value: v, label: v, count: open.filter((p) => p.last_verdict === v).length }))}
+              />
+              <Menu
+                label="Symbol"
+                value={symbolFilter}
+                onChange={changeSymbol}
+                onClear={() => changeSymbol(null)}
+                options={groups.map((g) => ({ value: g.symbol, label: g.symbol, count: g.lots.length }))}
+              />
+              <span className="ss-spacer" />
+              <span className="ss-muted app-small">One row per BUY fill (lot). SELLs close lots oldest-first.</span>
             </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-6">
-              <Stat label="Closed lots" value={sorted.length} />
-              <Stat label="Total realised ₹" value={<span className={signedClass(totalRealized)}>{fmtInr(totalRealized)}</span>} />
-              <Stat label="Win rate" value={rate === null ? '—' : `${rate.toFixed(1)}%`} />
+            {rows.length ? (
+              <DataTable
+                ariaLabel="Open positions"
+                density={settings.density}
+                columns={openColumns}
+                rows={rows}
+                rowKey={(p) => p.id}
+                initialSort={{ key: 'verdict', dir: 'asc' }}
+                onRowOpen={(p) => navigate(`/positions/${p.id}`)}
+                footer={
+                  <>
+                    <span>{rows.length} lots</span>
+                    <span className="ss-spacer" />
+                    <span>
+                      Unrealised total <Num kind="inr" value={rows.reduce((s, p) => s + (unrlInr(p) ?? 0), 0)} signed tone="auto" />
+                    </span>
+                  </>
+                }
+              />
+            ) : (
+              <Panel>
+                <EmptyState title="No positions match">Clear the filters to see every open lot.</EmptyState>
+              </Panel>
+            )}
+          </>
+        )
+      ) : null}
+
+      {tab === 'sym' ? (
+        groups.length === 0 ? (
+          <EmptyState title="No open positions">Buys you place at the broker appear here after the next 16:15 IST sync.</EmptyState>
+        ) : (
+          <DataTable
+            ariaLabel="Positions by symbol"
+            columns={symbolColumns}
+            rows={groups}
+            rowKey={(g) => g.symbol}
+            onRowOpen={(g) => {
+              if (g.lots.length === 1) navigate(`/positions/${g.lots[0].id}`)
+              else {
+                changeSymbol(g.symbol)
+                changeTab('open')
+              }
+            }}
+          />
+        )
+      ) : null}
+
+      {tab === 'closed' ? (
+        closed.length === 0 ? (
+          <EmptyState title="No closed positions">Closed lots appear here once a SELL fill closes them out.</EmptyState>
+        ) : (
+          <div className="ss-grid-2">
+            {/* min-w-0: src/ds's mobile override of .ss-grid-2 (<720px) drops the desktop
+                minmax(0, ...) column clamp, so a wide DataTable/Panel grid item reverts to
+                content-based auto sizing and blows out the viewport. Neutralised locally
+                (layout-only Tailwind utility) rather than editing src/ds — see final report. */}
+            <div className="min-w-0">
+              <DataTable
+                ariaLabel="Closed positions"
+                columns={closedColumns}
+                rows={closed}
+                rowKey={(p) => p.id}
+                initialSort={{ key: 'closed_on', dir: 'desc' }}
+                footer={
+                  <>
+                    <span>{closed.length} closed</span>
+                    <span className="ss-spacer" />
+                    <span>
+                      Realised (gross, before brokerage and taxes) <Num kind="inr" value={totalRealized} signed tone="auto" />
+                    </span>
+                  </>
+                }
+              />
             </div>
-          )}
-        </Panel>
-      )}
-
-      {emptyOpen && (
-        <EmptyState
-          title="No open positions"
-          message="Positions appear automatically after a broker sync or tradebook import."
-          action={
-            <Link to="/brokers" className="text-accent underline">
-              Go to Brokers
-            </Link>
-          }
-        />
-      )}
-      {emptyClosed && <EmptyState title="No closed positions yet" message="Closed lots will show up here once a SELL fill closes them out." />}
-
-      {!emptyOpen && !emptyClosed && (
-        <>
-          {/* Desktop / tablet: dense table */}
-          <div className="hidden md:block">
-            <Panel>
-              {grouped ? (
-                <DataTable
-                  columns={status === 'open' ? groupColumnsOpen : groupColumnsClosed}
-                  rows={groups}
-                  rowKey={(g) => g.symbol}
-                  expandable={(g) => lotSubRows(g.lots)}
-                />
-              ) : (
-                <DataTable
-                  columns={status === 'open' ? openColumns : closedColumns}
-                  rows={sorted}
-                  rowKey={(p) => p.id}
-                  onRowClick={(p) => navigate(`/positions/${p.id}`)}
-                />
-              )}
-            </Panel>
-          </div>
-
-          {/* Narrow screens: card list (per-lot, ungrouped) */}
-          <div className="flex flex-col gap-2 md:hidden">
-            {sorted.map((p) => (
-              <Link
-                key={p.id}
-                to={`/positions/${p.id}`}
-                className="flex flex-col gap-1 rounded border border-border bg-surface p-3 text-sm"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold">{p.symbol}</span>
-                  {p.latest_evaluation ? (
-                    <Chip variant="verdict" value={p.latest_evaluation.verdict} />
-                  ) : (
-                    <span className="text-xs text-muted">Not evaluated</span>
-                  )}
+            <div className="min-w-0">
+              <Panel title="By matched strategy" right={<span className="ss-muted app-small">computed client-side</span>}>
+                <div className="app-strat-grid app-strat-3">
+                  {strategyStats.map((g) => (
+                    <Fragment key={g.key}>
+                      {g.key === 'Unmatched' ? <Badge>Unmatched</Badge> : <StrategyTag strategy={g.key} />}
+                      <span className="ss-n ss-muted">
+                        {g.win}/{g.n} won
+                      </span>
+                      <Num kind="inr" value={g.pnl} signed tone="auto" />
+                    </Fragment>
+                  ))}
                 </div>
-                <div className="flex items-center justify-between text-xs">
-                  {status === 'open' ? (
-                    <span className={`num ${signedClass(p.latest_evaluation?.unrealized_pnl_pct)}`}>{fmtFrac(p.latest_evaluation?.unrealized_pnl_pct ?? null)}</span>
-                  ) : (
-                    <span className={`num ${signedClass(p.realized_pnl_pct)}`}>{fmtFrac(p.realized_pnl_pct)}</span>
-                  )}
-                  <span className="text-muted">
-                    Stop {fmtInr(p.latest_evaluation?.stop_level ?? null)} · Trail {fmtInr(p.latest_evaluation?.trail_level ?? null)}
-                  </span>
-                </div>
-                {p.latest_evaluation && p.latest_evaluation.reasons.length > 0 && (
-                  <div className="text-xs text-muted">{p.latest_evaluation.reasons.map((r) => reasonLabel(r.code)).join(', ')}</div>
-                )}
-              </Link>
-            ))}
+              </Panel>
+            </div>
           </div>
-        </>
-      )}
-
-      <Dialog open={evaluateOpen} onClose={() => setEvaluateOpen(false)} title="Re-evaluate positions">
-        <EvaluateDialogBody onDone={() => refetch()} />
-      </Dialog>
-    </div>
-  )
-}
-
-function EvaluateDialogBody({ onDone }: { onDone: () => void }) {
-  const [asOf, setAsOf] = useState('')
-  const mutation = useEvaluatePositions()
-
-  return (
-    <div className="flex flex-col gap-2 text-sm">
-      <label className="flex flex-col gap-1 text-xs text-muted">
-        As-of date (optional — defaults to the last trading day)
-        <input
-          type="date"
-          value={asOf}
-          onChange={(e) => setAsOf(e.target.value)}
-          className="rounded border border-border bg-surface px-2 py-1 text-sm text-text"
-        />
-      </label>
-      <Button
-        variant="primary"
-        disabled={mutation.isPending}
-        onClick={() =>
-          mutation.mutate(
-            { as_of: asOf || undefined },
-            { onSuccess: onDone },
-          )
-        }
-      >
-        {mutation.isPending ? 'Evaluating…' : 'Run'}
-      </Button>
-      {mutation.isError && <ErrorState error={mutation.error} title="Evaluation failed" />}
-      {mutation.isSuccess && mutation.data && (
-        <div className="rounded border border-border bg-surface-2 p-2 text-xs">
-          <p>
-            Evaluated {mutation.data.evaluated} position{mutation.data.evaluated === 1 ? '' : 's'} as of {mutation.data.as_of}.
-          </p>
-          <ul className="mt-1 flex flex-wrap gap-3">
-            {Object.entries(mutation.data.by_verdict).map(([v, n]) => (
-              <li key={v}>
-                {v}: {n}
-              </li>
-            ))}
-          </ul>
-          {mutation.data.errors.length > 0 && (
-            <p className="mt-1 text-exit">
-              {mutation.data.errors.length} error{mutation.data.errors.length === 1 ? '' : 's'}: {mutation.data.errors.map((e) => e.error).join('; ')}
-            </p>
-          )}
-        </div>
-      )}
+        )
+      ) : null}
     </div>
   )
 }

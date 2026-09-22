@@ -1,326 +1,336 @@
-// Position detail — handoff §5.4. Header, stat grid, levels, latest
-// evaluation, verdict history, match panel (with re-match dialog), fills.
+// Position detail — BUILD_BRIEF "Deliverable 1", mirroring
+// design/prototype/src/app.jsx:388-456 (PositionPage).
 
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router'
-import { usePosition, usePositionEvaluations, useTrades, useSignals, useMatchPosition } from '../../api/hooks'
-import { useSettings } from '../../lib/settings'
-import { fmtInr, fmtFrac, fmtPct, fmtIstDate, fmtIstDateTime, fmtNum, signedClass, istDateKey } from '../../lib/format'
-import { reasonLabel, warningLabel } from '../../lib/domain'
+import { useNavigate } from 'react-router'
+import {
+  useCandles,
+  useCorporateActions,
+  useEvaluatePositions,
+  useIndicators,
+  useMatchPosition,
+  usePosition,
+  usePositionEvaluations,
+  useSignals,
+  useTrades,
+} from '../../api/hooks'
 import { ApiError } from '../../api/types'
-import type { Position, Evaluation, Trade } from '../../api/types'
-import { DataTable, type DataTableColumn } from '../../components/DataTable'
-import { Panel } from '../../components/Panel'
-import { Stat } from '../../components/Stat'
-import { Chip } from '../../components/Chip'
-import { Button } from '../../components/Button'
-import { Dialog } from '../../components/Dialog'
-import { EmptyState } from '../../components/EmptyState'
-import { ErrorState } from '../../components/ErrorState'
-import { Loading } from '../../components/Loading'
-import { ApiKeyPrompt } from '../../components/ApiKeyPrompt'
-import { AvgEntryCell, ReasonsInline, WarningsBadge } from './cells'
-import { subDaysIso, unrealizedInr } from './helpers'
-
-const HISTORY_COLUMNS: DataTableColumn<Evaluation>[] = [
-  { key: 'date', header: 'Date', sortValue: (e) => e.as_of, render: (e) => fmtIstDate(e.as_of) },
-  { key: 'verdict', header: 'Verdict', sortValue: (e) => e.verdict, render: (e) => <Chip variant="verdict" value={e.verdict} /> },
-  { key: 'close', header: 'Close', align: 'right', sortValue: (e) => e.close, render: (e) => <span className="num">{fmtInr(e.close)}</span> },
-  { key: 'stop', header: 'Stop', align: 'right', sortValue: (e) => e.stop_level, render: (e) => <span className="num">{fmtInr(e.stop_level)}</span> },
-  { key: 'trail', header: 'Trail', align: 'right', sortValue: (e) => e.trail_level, render: (e) => <span className="num">{fmtInr(e.trail_level)}</span> },
-  {
-    key: 'unreal',
-    header: 'Unreal %',
-    align: 'right',
-    sortValue: (e) => e.unrealized_pnl_pct,
-    render: (e) => <span className={`num ${signedClass(e.unrealized_pnl_pct)}`}>{fmtFrac(e.unrealized_pnl_pct)}</span>,
-  },
-  { key: 'days', header: 'Days', align: 'right', sortValue: (e) => e.days_held, render: (e) => e.days_held },
-  { key: 'reasons', header: 'Reasons', render: (e) => <ReasonsInline reasons={e.reasons} /> },
-  { key: 'warnings', header: 'Warnings', render: (e) => <WarningsBadge warnings={e.warnings} /> },
-]
-
-const FILLS_COLUMNS: DataTableColumn<Trade>[] = [
-  { key: 'ts', header: 'Date/time', sortValue: (t) => t.trade_ts, render: (t) => fmtIstDateTime(t.trade_ts) },
-  {
-    key: 'side',
-    header: 'Side',
-    sortValue: (t) => t.side,
-    render: (t) => <span className={t.side === 'BUY' ? 'font-medium text-up' : 'font-medium text-down'}>{t.side}</span>,
-  },
-  { key: 'qty', header: 'Qty', align: 'right', sortValue: (t) => t.quantity, render: (t) => <span className="num">{fmtNum(t.quantity, 0)}</span> },
-  { key: 'price', header: 'Price', align: 'right', sortValue: (t) => t.price, render: (t) => <span className="num">{fmtInr(t.price)}</span> },
-]
+import type { Position, Trade } from '../../api/types'
+import { CandleChart } from '../../charts/CandleChart'
+import {
+  ApiKeyPrompt,
+  Badge,
+  Button,
+  CodeList,
+  type Column,
+  DataTable,
+  type Evaluation as DsEvaluation,
+  EmptyState,
+  ErrorState,
+  KV,
+  LevelLadder,
+  Loading,
+  Num,
+  PageHead,
+  Panel,
+  StrategyTag,
+  VerdictChip,
+  VerdictTimeline,
+  cx,
+  fmt,
+} from '../../ds'
+import { useSettings } from '../../lib/settings'
+import { useToast } from '../../lib/toast'
+import { errorMessage, posLevels, subDaysIso } from './helpers'
 
 export function PositionDetail({ id }: { id: number }) {
   const { settings } = useSettings()
   const navigate = useNavigate()
-  const { data: position, isLoading, isError, error } = usePosition(id)
+  const toast = useToast()
+
+  const { data: position, isLoading, isError, error, refetch: refetchPosition } = usePosition(id)
   const { data: evaluations } = usePositionEvaluations(id)
+  const { data: candles } = useCandles(position?.symbol, { timeframe: '1d', limit: 1300 })
+  const { data: indicators } = useIndicators(position?.symbol, { timeframe: '1d', limit: 1300 })
+  const { data: signals } = useSignals({ symbol: position?.symbol, timeframe: '1d', limit: 5000 })
+  const { data: actions } = useCorporateActions({ symbol: position?.symbol })
   const { data: trades } = useTrades({ symbol: position?.symbol })
-  const [matchDialogOpen, setMatchDialogOpen] = useState(false)
+
+  const [showAllEval, setShowAllEval] = useState(false)
+  const [rematchOpen, setRematchOpen] = useState(false)
+
+  const evaluateMutation = useEvaluatePositions()
 
   if (!settings.apiKey) return <ApiKeyPrompt message="Position detail needs your API key." />
   if (isLoading) return <Loading label="Loading position…" />
   if (isError) {
-    const status = error instanceof ApiError ? error.status : undefined
-    if (status === 404) {
+    if (error instanceof ApiError && error.status === 404) {
       return (
-        <EmptyState
-          title="Position not found"
-          message="It may have been removed, or the id in the URL is wrong."
-          action={
-            <Link to="/positions" className="text-accent underline">
-              Back to positions
-            </Link>
-          }
-        />
+        <div className="ss-page">
+          <EmptyState title={`Position #${id} not found`} action={<Button onClick={() => navigate('/positions')}>All positions</Button>} />
+        </div>
       )
     }
     return <ErrorState error={error} />
   }
   if (!position) return null
 
-  const ev = position.latest_evaluation
-  const fills = (trades ?? []).filter((t) => t.position_id === id)
-  const unrealized = unrealizedInr(position)
+  const e = position.latest_evaluation
+  const fills = (trades ?? []).filter((t) => t.position_id === position.id)
+  const eventSignals = (signals ?? []).filter((s) => s.strategy !== 'Confluence')
+  const levels = posLevels(position)
+
+  async function handleReevaluate() {
+    try {
+      await evaluateMutation.mutateAsync({})
+      const fresh = await refetchPosition()
+      const verdict = fresh.data?.last_verdict ?? '—'
+      const asOf = fresh.data?.last_evaluated_on
+      toast(`Re-evaluated #${id} as of ${asOf ? fmt.date(asOf) : '—'}: ${verdict}`)
+    } catch (err) {
+      toast(errorMessage(err))
+    }
+  }
+
+  const fillsColumns: Column<Trade>[] = [
+    { key: 'd', label: 'Time (IST)', render: (t) => <span className="ss-n">{fmt.date(t.trade_ts)} {fmt.time(t.trade_ts, false)}</span> },
+    { key: 's', label: 'Side', render: (t) => <Badge tone={t.side === 'BUY' ? 'up' : 'down'}>{t.side}</Badge> },
+    { key: 'q', label: 'Qty', align: 'right', render: (t) => <Num kind="qty" value={t.quantity} /> },
+    { key: 'p', label: 'Price', align: 'right', render: (t) => <Num value={t.price} /> },
+  ]
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Link to={`/symbols/${position.symbol}`} className="text-lg font-semibold text-accent hover:underline">
-              {position.symbol}
-            </Link>
-            {ev ? <Chip variant="verdict" value={ev.verdict} /> : <span className="text-xs text-muted">Not yet evaluated</span>}
-            <span className={`text-xs font-medium ${position.status === 'open' ? 'text-up' : 'text-muted'}`}>{position.status}</span>
-          </div>
-          <p className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted">
-            <span>Opened {fmtIstDate(position.opened_on)}</span>
-            {position.closed_on && <span>· Closed {fmtIstDate(position.closed_on)}</span>}
-            <span>·</span>
-            {position.is_unmatched || !position.matched_strategy ? (
-              <span>Unmatched</span>
-            ) : (
-              <span className="inline-flex items-center gap-1">
-                <Chip variant="strategy" value={position.matched_strategy} />
-                {fmtPct((position.match_confidence ?? 0) * 100)} confidence
-              </span>
-            )}
-          </p>
-        </div>
-        <Button onClick={() => navigate(`/symbols/${position.symbol}`)}>Open chart</Button>
+    <div className="ss-page">
+      <div className="app-crumbs">
+        <button type="button" className="app-link" onClick={() => navigate('/positions')}>
+          Positions
+        </button>
+        <span className="ss-faint">/</span>
+        <span className="ss-n">#{position.id}</span>
       </div>
 
-      <Panel title="Overview">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-          <Stat label="Qty open/total" value={`${fmtNum(position.qty_open, 0)}/${fmtNum(position.qty_total, 0)}`} />
-          <Stat label="Avg entry" value={<AvgEntryCell position={position} />} />
-          <Stat label="Last close" value={fmtInr(ev?.close ?? null)} />
-          <Stat
-            label="Unrealised %"
-            value={<span className={signedClass(ev?.unrealized_pnl_pct)}>{fmtFrac(ev?.unrealized_pnl_pct ?? null)}</span>}
-          />
-          <Stat label="Unrealised ₹" value={<span className={signedClass(unrealized)}>{fmtInr(unrealized)}</span>} />
-          <Stat label="Days held" value={ev?.days_held ?? '—'} />
-          {position.status === 'closed' && (
-            <>
-              <Stat label="Realised ₹" value={<span className={signedClass(position.realized_pnl)}>{fmtInr(position.realized_pnl)}</span>} />
-              <Stat label="Realised %" value={<span className={signedClass(position.realized_pnl_pct)}>{fmtFrac(position.realized_pnl_pct)}</span>} />
-            </>
-          )}
-        </div>
-      </Panel>
-
-      <Panel title="Levels">
-        <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
-          <div>
-            <p className="text-xs text-muted">Entry</p>
-            <AvgEntryCell position={position} />
-          </div>
-          <div>
-            <p className="text-xs text-muted">Stop</p>
-            <p className="num">{fmtInr(ev?.stop_level ?? position.frozen_stop ?? null)}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted">Trail</p>
-            <p className="num">{fmtInr(ev?.trail_level ?? null)}</p>
-          </div>
-          {position.is_unmatched ? (
-            <div className="col-span-2 flex items-center">
-              <p className="text-xs text-warn">Unmatched: trailing stop only, no targets</p>
-            </div>
-          ) : (
-            <>
-              <div>
-                <p className="text-xs text-muted">T1</p>
-                <p className="num">{fmtInr(ev?.target_1 ?? position.frozen_target_1 ?? null)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted">T2</p>
-                <p className="num">{fmtInr(ev?.target_2 ?? position.frozen_target_2 ?? null)}</p>
-              </div>
-            </>
-          )}
-        </div>
-      </Panel>
-
-      <Panel title="Latest evaluation">
-        {ev ? (
-          <div className="flex flex-col gap-3 text-sm">
-            <div className="flex items-center gap-2">
-              <Chip variant="verdict" value={ev.verdict} />
-              <span className="text-xs text-muted">as of {fmtIstDate(ev.as_of)}</span>
-            </div>
-            <div>
-              <p className="mb-1 text-xs text-muted">Reasons</p>
-              {ev.reasons.length === 0 ? (
-                <p className="text-xs text-muted">None</p>
-              ) : (
-                <ul className="flex flex-col gap-1 text-xs">
-                  {ev.reasons.map((r, i) => (
-                    <li key={i}>
-                      <span className="font-medium">{reasonLabel(r.code)}</span>
-                      {r.detail && <span className="text-muted"> — {r.detail}</span>}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <div>
-              <p className="mb-1 text-xs text-muted">Warnings</p>
-              {ev.warnings.length === 0 ? (
-                <p className="text-xs text-muted">None</p>
-              ) : (
-                <ul className="flex flex-col gap-1 text-xs">
-                  {ev.warnings.map((w, i) => (
-                    <li key={i}>
-                      <span className="font-medium">{warningLabel(w.code)}</span>
-                      {w.detail && <span className="text-muted"> — {w.detail}</span>}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        ) : (
-          <p className="text-sm text-muted">Not yet evaluated.</p>
-        )}
-      </Panel>
-
-      <Panel title="Verdict history">
-        {!evaluations || evaluations.length === 0 ? (
-          <p className="text-sm text-muted">No evaluation history yet.</p>
-        ) : (
-          <DataTable columns={HISTORY_COLUMNS} rows={evaluations} rowKey={(e) => e.as_of} />
-        )}
-      </Panel>
-
-      <Panel
-        title="Match"
-        actions={
-          <Button size="sm" onClick={() => setMatchDialogOpen(true)}>
-            Change match
-          </Button>
+      <PageHead
+        title={
+          <span className="app-mono">
+            {position.symbol} <span className="ss-muted ss-n" style={{ fontSize: 14 }}>lot #{position.id}</span>
+          </span>
+        }
+        sub={
+          (position.status === 'open' ? `${fmt.qty(position.qty_open)} of ${fmt.qty(position.qty_total)} open` : `Closed ${fmt.date(position.closed_on ?? '')}`) +
+          ` · opened ${fmt.date(position.opened_on)}`
         }
       >
-        {position.is_unmatched || !position.matched_strategy ? (
-          <p className="text-sm text-muted">Unmatched — trailing stop only, no targets.</p>
-        ) : (
-          <div className="flex flex-col gap-2 text-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <Chip variant="strategy" value={position.matched_strategy} />
-              <span className="text-xs text-muted">
-                {fmtIstDate(position.matched_signal_ts)} · {fmtPct((position.match_confidence ?? 0) * 100)} confidence
-              </span>
-            </div>
-            {position.match_reason && <p className="text-xs text-muted">{position.match_reason}</p>}
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div>
-                <p className="text-xs text-muted">Frozen entry</p>
-                <p className="num">{fmtInr(position.frozen_entry)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted">Frozen stop</p>
-                <p className="num">{fmtInr(position.frozen_stop)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted">Frozen T1</p>
-                <p className="num">{fmtInr(position.frozen_target_1)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted">Frozen T2</p>
-                <p className="num">{fmtInr(position.frozen_target_2)}</p>
-              </div>
-            </div>
+        {position.status === 'open' ? (
+          <Button size="sm" icon="sync" loading={evaluateMutation.isPending} onClick={handleReevaluate}>
+            Re-evaluate
+          </Button>
+        ) : null}
+        <Button size="sm" icon="symbol" onClick={() => navigate(`/symbols/${position.symbol}`)}>
+          Symbol page
+        </Button>
+        <Button size="sm" variant="ghost" icon="trades" onClick={() => navigate(`/trades?symbol=${position.symbol}`)}>
+          Fills &amp; reattribution
+        </Button>
+      </PageHead>
+
+      {e ? (
+        <div className="app-verdict-line">
+          <VerdictChip verdict={e.verdict} />
+          {/* min-w-0: a long warning/reason detail renders as a nowrap+ellipsis chip
+              (src/ds .ss-code-text); without an explicit min-width:0 on this flex item, the
+              ellipsis never engages and the chip pushes the page wider on narrow viewports.
+              Neutralised locally rather than editing src/ds — see final report. */}
+          <div className="min-w-0">
+            <CodeList reasons={e.reasons} warnings={e.warnings} />
           </div>
-        )}
-      </Panel>
+        </div>
+      ) : null}
 
-      <Panel title="Fills">
-        {fills.length === 0 ? (
-          <p className="text-sm text-muted">No linked fills.</p>
-        ) : (
-          <DataTable columns={FILLS_COLUMNS} rows={fills} rowKey={(t) => t.id} />
-        )}
-      </Panel>
+      <CandleChart
+        candles={candles ?? []}
+        indicators={indicators ?? []}
+        timeframe="1d"
+        overlays={{ ema50: true, ema200: false, supertrend: true, bollinger: false, keltner: false }}
+        panes={{ macd: false, adx: false, rvol: false, ttm: false }}
+        signals={eventSignals}
+        actions={actions ?? []}
+        positions={[position]}
+        levels={levels}
+        focusFrom={position.opened_on}
+        height={340}
+      />
 
-      <Dialog open={matchDialogOpen} onClose={() => setMatchDialogOpen(false)} title="Change match">
-        {matchDialogOpen && <CandidateSignals position={position} onClose={() => setMatchDialogOpen(false)} />}
-      </Dialog>
+      {e ? (
+        <Panel
+          title="Levels"
+          right={
+            position.is_unmatched ? (
+              <Badge title="Trailing stop only, no targets">Unmatched</Badge>
+            ) : (
+              <span className="ss-muted app-small">frozen from the matched signal · chandelier trail = HH − 2.5 × ATR</span>
+            )
+          }
+        >
+          <LevelLadder
+            entry={position.avg_entry_price}
+            close={e.close}
+            stop={position.is_unmatched ? undefined : (position.frozen_stop ?? undefined)}
+            trail={e.trail_level ?? undefined}
+            t1={position.frozen_target_1 ?? undefined}
+            t2={position.frozen_target_2 ?? undefined}
+            matched={!position.is_unmatched}
+          />
+        </Panel>
+      ) : null}
+
+      {/* min-w-0 on both grid children: src/ds's mobile override of .ss-grid-2 (<720px) drops
+          the desktop minmax(0, ...) column clamp, so a wide grid item (the Fills table below)
+          reverts to content-based auto sizing and blows out the viewport. Neutralised locally
+          (layout-only Tailwind utility) rather than editing src/ds — see final report. */}
+      <div className="ss-grid-2">
+        <div className="min-w-0">
+          <Panel title="Verdict history" right={<span className="ss-muted app-small">{(evaluations ?? []).length} sessions · newest first</span>}>
+            {evaluations && evaluations.length ? (
+              <>
+                <VerdictTimeline entries={(showAllEval ? evaluations : evaluations.slice(0, 10)) as unknown as DsEvaluation[]} />
+                {evaluations.length > 10 ? (
+                  <button type="button" className="app-link app-small" style={{ marginTop: 8 }} onClick={() => setShowAllEval((x) => !x)}>
+                    {showAllEval ? 'Show latest 10' : `Show all ${evaluations.length} sessions`}
+                  </button>
+                ) : null}
+              </>
+            ) : (
+              <span className="ss-muted">No evaluations stored for this lot.</span>
+            )}
+          </Panel>
+        </div>
+
+        <div className="app-col min-w-0">
+          <Panel
+            title="Signal match"
+            right={
+              position.status === 'open' ? (
+                <Button size="sm" onClick={() => setRematchOpen((r) => !r)}>
+                  {position.is_unmatched ? 'Match manually' : 'Re-match'}
+                </Button>
+              ) : null
+            }
+          >
+            {position.is_unmatched ? (
+              <p className="ss-muted" style={{ margin: 0 }}>
+                No 1d signal within 5% of the fill in the 5 sessions up to {fmt.date(position.opened_on)} scored ≥ 0.5. Trailing stop only, no targets.
+              </p>
+            ) : (
+              <KV
+                items={[
+                  ['Strategy', <StrategyTag key="s" strategy={position.matched_strategy!} />],
+                  ['Signal date', <span key="d" className="ss-n">{fmt.date(position.matched_signal_ts ?? '')}</span>],
+                  [
+                    'Confidence',
+                    <span key="c" className="ss-n">
+                      {(position.match_confidence ?? 0).toFixed(2)}
+                      {position.match_reason === 'manual' ? ' · manual' : ''}
+                    </span>,
+                  ],
+                  ['Reason', <span key="r" className="ss-mono app-small">{position.match_reason}</span>],
+                  ['Frozen entry', <Num key="fe" value={position.frozen_entry} />],
+                  ['Frozen stop', <Num key="fs" value={position.frozen_stop} />],
+                  [
+                    'T1 / T2',
+                    <span key="t">
+                      <Num value={position.frozen_target_1} /> / <Num value={position.frozen_target_2} />
+                    </span>,
+                  ],
+                ]}
+              />
+            )}
+            {rematchOpen ? <RematchPanel position={position} onClose={() => setRematchOpen(false)} /> : null}
+          </Panel>
+
+          <Panel title="Entry price">
+            <KV
+              items={[
+                ['Avg entry (adjusted)', <Num key="a" kind="inr" value={position.avg_entry_price} />],
+                ['Avg entry (as paid)', <Num key="b" kind="inr" value={position.avg_entry_price_raw} />],
+                [
+                  'Structural factor',
+                  <span key="f" className="ss-n">
+                    {(position.structural_factor_applied ?? 1).toFixed(4)}
+                    {position.structural_factor_applied === 1 ? ' · no split/bonus since buy' : ''}
+                  </span>,
+                ],
+              ]}
+            />
+          </Panel>
+
+          <Panel title="Fills" pad={false}>
+            <DataTable ariaLabel="Fills" columns={fillsColumns} rows={fills} rowKey={(t) => t.id} />
+          </Panel>
+        </div>
+      </div>
     </div>
   )
 }
 
-function CandidateSignals({ position, onClose }: { position: Position; onClose: () => void }) {
+function RematchPanel({ position, onClose }: { position: Position; onClose: () => void }) {
+  const toast = useToast()
   const since = subDaysIso(position.opened_on, 14)
   const { data: signals, isLoading, isError, error } = useSignals({ symbol: position.symbol, timeframe: '1d', since, limit: 200 })
+  const [pick, setPick] = useState<string | null>(null)
   const matchMutation = useMatchPosition()
 
-  if (isLoading) return <Loading label="Loading candidate signals…" />
-  if (isError) return <ErrorState error={error} />
+  const candidates = (signals ?? []).filter((s) => s.ts.slice(0, 10) <= position.opened_on)
 
-  const candidates = (signals ?? []).filter((s) => (istDateKey(s.ts) ?? '') <= position.opened_on)
+  function doMatch() {
+    const s = candidates.find((x) => x.strategy + x.ts === pick)
+    if (!s) return
+    matchMutation.mutate(
+      { id: position.id, body: { strategy: s.strategy, ts: s.ts } },
+      {
+        onSuccess: () => {
+          toast(`Matched #${position.id} to ${s.strategy} @${fmt.date(s.ts)}`)
+          onClose()
+        },
+        onError: (err) => {
+          if (err instanceof ApiError && err.status === 404) toast('No matching signal found')
+          else toast(errorMessage(err))
+        },
+      },
+    )
+  }
 
   return (
-    <div className="flex flex-col gap-2">
-      {matchMutation.isError && <ErrorState error={matchMutation.error} title={matchErrorTitle(matchMutation.error)} />}
-      {candidates.length === 0 ? (
-        <p className="text-sm text-muted">
-          No 1d signals found for {position.symbol} in the two weeks up to {fmtIstDate(position.opened_on)}.
-        </p>
-      ) : (
-        <div className="flex max-h-96 flex-col gap-1 overflow-y-auto">
-          {candidates.map((s) => (
-            <div key={`${s.strategy}-${s.ts}`} className="flex flex-wrap items-center justify-between gap-2 rounded border border-border px-2 py-1.5 text-xs">
-              <div className="flex items-center gap-2">
-                <Chip variant="strategy" value={s.strategy} />
-                <span className="text-muted">{fmtIstDate(s.ts)}</span>
-              </div>
-              <div className="num flex items-center gap-3">
-                <span>E {fmtInr(s.entry)}</span>
-                <span>S {fmtInr(s.stop_loss)}</span>
-                <span>T1 {fmtInr(s.target_1)}</span>
-                <span>T2 {fmtInr(s.target_2)}</span>
-              </div>
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={matchMutation.isPending}
-                onClick={() => matchMutation.mutate({ id: position.id, body: { strategy: s.strategy, ts: s.ts } }, { onSuccess: onClose })}
-              >
-                Use this
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
+    <div className="app-rematch">
+      <div className="ss-label">
+        Candidate 1d signals · {fmt.date(since)} → {fmt.date(position.opened_on)}
+      </div>
+      {isLoading ? <Loading label="Loading candidate signals…" /> : null}
+      {isError ? <ErrorState error={error} /> : null}
+      {!isLoading && !isError ? (
+        candidates.length ? (
+          candidates.map((s) => {
+            const k = s.strategy + s.ts
+            return (
+              <label key={k} className={cx('app-cand', pick === k && 'on')}>
+                <input type="radio" name="cand" checked={pick === k} onChange={() => setPick(k)} />
+                <StrategyTag strategy={s.strategy} />
+                <span className="ss-n">{fmt.date(s.ts)}</span>
+                <span className="ss-n ss-muted">entry {fmt.price(s.entry)}</span>
+              </label>
+            )
+          })
+        ) : (
+          <span className="ss-muted">No 1d signals for {position.symbol} in that window.</span>
+        )
+      ) : null}
+      <div className="app-row">
+        <Button size="sm" variant="primary" disabled={!pick || matchMutation.isPending} onClick={doMatch}>
+          Match selected
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+      </div>
     </div>
   )
-}
-
-function matchErrorTitle(error: unknown): string {
-  if (error instanceof ApiError && error.status === 404) return 'No matching signal found'
-  return 'Could not update match'
 }

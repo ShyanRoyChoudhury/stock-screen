@@ -1,36 +1,50 @@
-// Trades — handoff §5.5. Audit raw broker fills, filter by date/symbol, and
-// reattribute a SELL fill across open lots when FIFO guessed wrong.
+// Trades — BUILD_BRIEF "Deliverable 2", mirroring
+// design/prototype/src/app.jsx:459-508 (Trades + Reattribute).
 
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
-import { useTrades, usePositions, useReattributeSell } from '../../api/hooks'
-import { useSettings } from '../../lib/settings'
-import { fmtIstDateTime, fmtInr, fmtNum, fmtIstDate } from '../../lib/format'
+import { usePositions, useReattributeSell, useTrades } from '../../api/hooks'
+import { ApiError } from '../../api/types'
 import type { Trade } from '../../api/types'
-import { DataTable, type DataTableColumn } from '../../components/DataTable'
-import { Panel } from '../../components/Panel'
-import { Button } from '../../components/Button'
-import { Dialog } from '../../components/Dialog'
-import { Tooltip } from '../../components/Tooltip'
-import { ApiKeyPrompt } from '../../components/ApiKeyPrompt'
-import { ErrorState } from '../../components/ErrorState'
-import { EmptyState } from '../../components/EmptyState'
-import { Loading } from '../../components/Loading'
+import {
+  ApiKeyPrompt,
+  Badge,
+  Banner,
+  Button,
+  type Column,
+  DataTable,
+  EmptyState,
+  ErrorState,
+  Loading,
+  Num,
+  PageHead,
+  Tabs,
+  fmt,
+} from '../../ds'
+import { useSettings } from '../../lib/settings'
+import { useToast } from '../../lib/toast'
+
+function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) return `${err.status} · ${err.message}`
+  return err instanceof Error ? err.message : String(err)
+}
+
+type Side = 'all' | 'BUY' | 'SELL'
 
 export default function TradesPage() {
   const { settings } = useSettings()
   const [searchParams, setSearchParams] = useSearchParams()
-  const fromDate = searchParams.get('from') ?? ''
-  const toDate = searchParams.get('to') ?? ''
-  const symbolFilter = searchParams.get('symbol') ?? ''
+  const symbolParam = searchParams.get('symbol') ?? ''
+  const fromParam = searchParams.get('from') ?? ''
+  const toParam = searchParams.get('to') ?? ''
+  const sideParamRaw = searchParams.get('side')
+  const sideParam: Side = sideParamRaw === 'BUY' || sideParamRaw === 'SELL' ? sideParamRaw : 'all'
 
   const { data: trades, isLoading, isError, error } = useTrades({
-    from_date: fromDate || undefined,
-    to_date: toDate || undefined,
-    symbol: symbolFilter || undefined,
+    from_date: fromParam || undefined,
+    to_date: toParam || undefined,
+    symbol: symbolParam || undefined,
   })
-
-  const [reattributeTrade, setReattributeTrade] = useState<Trade | null>(null)
 
   function updateParam(key: string, value: string) {
     setSearchParams((prev) => {
@@ -41,211 +55,218 @@ export default function TradesPage() {
     })
   }
 
-  const columns: DataTableColumn<Trade>[] = useMemo(
-    () => [
-      { key: 'ts', header: 'Date/time', sortValue: (t) => t.trade_ts, render: (t) => fmtIstDateTime(t.trade_ts) },
-      { key: 'broker', header: 'Broker', sortValue: (t) => t.broker, render: (t) => t.broker },
-      { key: 'tradingsymbol', header: 'Tradingsymbol', sortValue: (t) => t.tradingsymbol, render: (t) => t.tradingsymbol },
-      {
-        key: 'symbol',
-        header: 'Mapped symbol',
-        sortValue: (t) => t.symbol ?? '',
-        render: (t) =>
-          t.symbol ? (
-            <Link to={`/symbols/${t.symbol}`} className="text-accent hover:underline">
-              {t.symbol}
-            </Link>
-          ) : (
-            <Tooltip text="Broker symbol did not resolve to a Nifty 500 symbol; the ledger skips it">
-              <span className="inline-flex items-center rounded border border-warn px-1.5 py-0.5 text-xs text-warn">unmapped</span>
-            </Tooltip>
-          ),
-      },
-      { key: 'isin', header: 'ISIN', render: (t) => t.isin ?? '—' },
-      {
-        key: 'side',
-        header: 'Side',
-        sortValue: (t) => t.side,
-        render: (t) => <span className={t.side === 'BUY' ? 'font-medium text-up' : 'font-medium text-down'}>{t.side}</span>,
-      },
-      { key: 'qty', header: 'Qty', align: 'right', sortValue: (t) => t.quantity, render: (t) => <span className="num">{fmtNum(t.quantity, 0)}</span> },
-      { key: 'price', header: 'Price', align: 'right', sortValue: (t) => t.price, render: (t) => <span className="num">{fmtInr(t.price)}</span> },
-      {
-        key: 'position',
-        header: 'Position',
-        sortValue: (t) => t.position_id ?? -1,
-        render: (t) =>
-          t.position_id ? (
-            <Link to={`/positions/${t.position_id}`} className="text-accent hover:underline">
-              #{t.position_id}
-            </Link>
-          ) : (
-            <span className="text-muted">—</span>
-          ),
-      },
-      {
-        key: 'applied',
-        header: 'Applied',
-        render: (t) =>
-          t.applied_at ? (
-            <span className="text-up">✓ {fmtIstDate(t.applied_at)}</span>
-          ) : (
-            <span className="text-muted">pending</span>
-          ),
-      },
-      {
-        key: 'actions',
-        header: '',
-        render: (t) =>
-          t.side === 'SELL' && t.symbol ? (
-            <Button size="sm" onClick={() => setReattributeTrade(t)}>
-              Reattribute
-            </Button>
-          ) : null,
-      },
-    ],
-    [],
-  )
+  const all = trades ?? []
+  const rows = useMemo(() => all.filter((t) => sideParam === 'all' || t.side === sideParam), [all, sideParam])
+  const unmapped = all.filter((t) => !t.symbol).length
+
+  const columns: Column<Trade>[] = [
+    {
+      key: 'trade_ts',
+      label: 'Date / time (IST)',
+      sortable: true,
+      sortValue: (t) => t.trade_ts,
+      render: (t) => (
+        <span className="ss-n">
+          {fmt.date(t.trade_ts)} <span className="ss-muted">{fmt.time(t.trade_ts, false)}</span>
+        </span>
+      ),
+    },
+    { key: 'broker', label: 'Broker', render: (t) => <span className="ss-muted">{t.broker}</span> },
+    { key: 'tradingsymbol', label: 'Tradingsymbol', render: (t) => <span className="ss-mono">{t.tradingsymbol}</span> },
+    {
+      key: 'symbol',
+      label: 'Mapped',
+      render: (t) =>
+        t.symbol ? (
+          <Link to={`/symbols/${t.symbol}`} className="app-link ss-sym" onClick={(e) => e.stopPropagation()}>
+            {t.symbol}
+          </Link>
+        ) : (
+          <Badge tone="down">Unmapped</Badge>
+        ),
+    },
+    { key: 'isin', label: 'ISIN', render: (t) => <span className="ss-n ss-faint">{t.isin ?? '—'}</span> },
+    { key: 'side', label: 'Side', render: (t) => <Badge tone={t.side === 'BUY' ? 'up' : 'down'}>{t.side}</Badge> },
+    { key: 'quantity', label: 'Qty', align: 'right', render: (t) => <Num kind="qty" value={t.quantity} /> },
+    { key: 'price', label: 'Price', align: 'right', render: (t) => <Num value={t.price} /> },
+    {
+      key: 'pos',
+      label: 'Position',
+      render: (t) =>
+        t.position_id ? (
+          <Link to={`/positions/${t.position_id}`} className="app-link ss-n" onClick={(e) => e.stopPropagation()}>
+            #{t.position_id}
+          </Link>
+        ) : (
+          <span className="ss-faint">—</span>
+        ),
+    },
+    {
+      key: 'applied',
+      label: 'Applied',
+      render: (t) => (t.applied_at ? <span className="ss-n ss-muted">✓ {fmt.date(t.applied_at)}</span> : <span className="ss-down app-small">skipped · unmapped</span>),
+    },
+  ]
 
   if (!settings.apiKey) return <ApiKeyPrompt message="Trades needs your API key to load your fills." />
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold">Trades</h1>
-        <p className="text-sm text-muted">Audit the raw broker fills and fix the ledger when FIFO guessed wrong.</p>
+    <div className="ss-page">
+      <PageHead title="Trades" sub={`${all.length} broker fills · ledger audit`} />
+
+      {unmapped ? (
+        <Banner tone="degraded" title={`${unmapped} unmapped fill${unmapped > 1 ? 's' : ''}`}>
+          The broker symbol didn’t resolve to a Nifty 500 symbol, so the ledger skipped it. No position was opened.
+        </Banner>
+      ) : null}
+
+      <div className="app-filters">
+        <div className="app-inline-field">
+          <label className="ss-label" htmlFor="tr-sym">
+            Symbol
+          </label>
+          <input
+            id="tr-sym"
+            className="ss-input ss-input-mono"
+            value={symbolParam}
+            onChange={(e) => updateParam('symbol', e.target.value.toUpperCase())}
+            placeholder="Any"
+          />
+        </div>
+        <div className="app-inline-field">
+          <label className="ss-label" htmlFor="tr-from">
+            From
+          </label>
+          <input id="tr-from" type="date" className="ss-input ss-input-mono" value={fromParam} onChange={(e) => updateParam('from', e.target.value)} />
+        </div>
+        <div className="app-inline-field">
+          <label className="ss-label" htmlFor="tr-to">
+            To
+          </label>
+          <input id="tr-to" type="date" className="ss-input ss-input-mono" value={toParam} onChange={(e) => updateParam('to', e.target.value)} />
+        </div>
+        <Tabs
+          variant="segmented"
+          ariaLabel="Side"
+          value={sideParam}
+          onChange={(v) => updateParam('side', v === 'all' ? '' : v)}
+          items={[
+            { id: 'all', label: 'All' },
+            { id: 'BUY', label: 'BUY' },
+            { id: 'SELL', label: 'SELL' },
+          ]}
+        />
       </div>
 
-      <Panel>
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-xs text-muted">
-            From
-            <input
-              type="date"
-              value={fromDate}
-              onChange={(e) => updateParam('from', e.target.value)}
-              className="rounded border border-border bg-surface px-2 py-1 text-sm text-text"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-muted">
-            To
-            <input
-              type="date"
-              value={toDate}
-              onChange={(e) => updateParam('to', e.target.value)}
-              className="rounded border border-border bg-surface px-2 py-1 text-sm text-text"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-muted">
-            Symbol
-            <input
-              type="text"
-              value={symbolFilter}
-              onChange={(e) => updateParam('symbol', e.target.value.toUpperCase())}
-              placeholder="e.g. RELIANCE"
-              className="rounded border border-border bg-surface px-2 py-1 text-sm text-text"
-            />
-          </label>
-        </div>
-      </Panel>
-
-      {isLoading && <Loading label="Loading trades…" />}
-      {isError && <ErrorState error={error} />}
-      {!isLoading && !isError && (!trades || trades.length === 0) && (
-        <EmptyState
-          title="No trades yet"
-          message="Sync a broker account or import a tradebook CSV."
-          action={
-            <Link to="/brokers" className="text-accent underline">
-              Go to Brokers
-            </Link>
+      {isLoading ? <Loading label="Loading trades…" /> : null}
+      {isError ? <ErrorState error={error} /> : null}
+      {!isLoading && !isError && all.length === 0 ? <EmptyState title="No fills yet">Sync a broker account or import a tradebook CSV.</EmptyState> : null}
+      {!isLoading && !isError && all.length > 0 ? (
+        <DataTable
+          ariaLabel="Trades"
+          columns={columns}
+          rows={rows}
+          rowKey={(t) => t.id}
+          renderExpanded={(t) =>
+            t.side === 'SELL' && t.symbol ? (
+              <Reattribute trade={t} />
+            ) : (
+              <span className="ss-muted">
+                {t.side === 'BUY'
+                  ? t.position_id
+                    ? `This BUY opened lot #${t.position_id}.`
+                    : `Not applied: no Nifty 500 symbol for ${t.tradingsymbol}.`
+                  : 'Unmapped SELL — nothing to reattribute.'}
+              </span>
+            )
+          }
+          footer={
+            <>
+              <span>{rows.length} fills</span>
+              <span className="ss-spacer" />
+              <span>Expand a SELL to reattribute it across lots</span>
+            </>
           }
         />
-      )}
-      {!isLoading && !isError && trades && trades.length > 0 && (
-        <Panel>
-          <DataTable columns={columns} rows={trades} rowKey={(t) => t.id} />
-        </Panel>
-      )}
-
-      {reattributeTrade && <ReattributeDialog trade={reattributeTrade} onClose={() => setReattributeTrade(null)} />}
+      ) : null}
     </div>
   )
 }
 
-function ReattributeDialog({ trade, onClose }: { trade: Trade; onClose: () => void }) {
+function Reattribute({ trade }: { trade: Trade }) {
+  const toast = useToast()
   const { data: allPositions } = usePositions()
-  const positions = useMemo(() => (allPositions ?? []).filter((p) => p.symbol === trade.symbol), [allPositions, trade.symbol])
-
-  const [allocations, setAllocations] = useState<Record<number, number>>({})
-
-  useEffect(() => {
-    setAllocations((prev) => {
-      const next: Record<number, number> = { ...prev }
-      for (const p of positions) {
-        if (!(p.id in next)) next[p.id] = p.id === trade.position_id ? trade.quantity : 0
-      }
-      return next
-    })
-  }, [positions, trade])
-
+  const lots = (allPositions ?? []).filter((p) => p.symbol === trade.symbol)
+  const [alloc, setAlloc] = useState<Record<number, string | number>>({})
   const mutation = useReattributeSell()
 
-  const sum = Object.values(allocations).reduce((s, n) => s + (Number.isFinite(n) ? n : 0), 0)
-  const valid = sum === trade.quantity && positions.length > 0
+  // `lots` arrives asynchronously (usePositions() fetches fresh on this row's first mount), so
+  // the default allocation is filled in here rather than in useState's initializer, which would
+  // run before the query resolves and leave every lot defaulted to 0.
+  useEffect(() => {
+    setAlloc((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const p of lots) {
+        if (!(p.id in next)) {
+          next[p.id] = p.id === trade.position_id ? trade.quantity : 0
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lots.map((p) => p.id).join(','), trade.id])
+
+  const sum = Object.values(alloc).reduce((s: number, v) => s + (Number(v) || 0), 0)
+  const over = lots.find((p) => (Number(alloc[p.id]) || 0) > p.qty_total)
+  const err = sum !== trade.quantity ? `Allocations sum to ${sum}; the SELL is for ${trade.quantity}.` : over ? `Lot #${over.id} only has ${over.qty_total} shares.` : null
 
   function submit() {
-    const body = {
-      allocations: positions
-        .filter((p) => (allocations[p.id] ?? 0) > 0)
-        .map((p) => ({ position_id: p.id, quantity: allocations[p.id] })),
-    }
-    mutation.mutate({ sellId: trade.id, body }, { onSuccess: onClose })
+    const allocations = lots.filter((p) => (Number(alloc[p.id]) || 0) > 0).map((p) => ({ position_id: p.id, quantity: Number(alloc[p.id]) }))
+    mutation.mutate(
+      { sellId: trade.id, body: { allocations } },
+      {
+        onSuccess: () => toast(`Reattributed SELL #${trade.id} across ${allocations.length} lot${allocations.length === 1 ? '' : 's'}.`),
+      },
+    )
+  }
+
+  if (lots.length === 0) {
+    return <span className="ss-down app-small">No positions found for {trade.symbol}.</span>
   }
 
   return (
-    <Dialog open onClose={onClose} title={`Reattribute SELL #${trade.id} — ${trade.tradingsymbol}`}>
-      <div className="flex flex-col gap-3 text-sm">
-        <p className="text-xs text-muted">
-          Allocate this {fmtNum(trade.quantity, 0)}-qty SELL across {trade.symbol}'s open lots. Quantities must sum to {fmtNum(trade.quantity, 0)}.
-        </p>
-
-        {positions.length === 0 ? (
-          <p className="text-xs text-down">No positions found for {trade.symbol}.</p>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {positions.map((p) => (
-              <div key={p.id} className="flex items-center justify-between gap-3">
-                <span className="text-xs text-muted">
-                  #{p.id} · opened {fmtIstDate(p.opened_on)} · qty total {fmtNum(p.qty_total, 0)}
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={allocations[p.id] ?? 0}
-                  onChange={(e) =>
-                    setAllocations((prev) => ({ ...prev, [p.id]: Number(e.target.value) }))
-                  }
-                  className="num w-24 rounded border border-border bg-surface px-2 py-1 text-sm text-text"
-                />
-              </div>
-            ))}
-          </div>
-        )}
-
-        <p className={`text-xs ${valid ? 'text-up' : 'text-down'}`}>
-          Sum: {fmtNum(sum, 0)} / {fmtNum(trade.quantity, 0)} {valid ? '✓' : ''}
-        </p>
-
-        {mutation.isError && <ErrorState error={mutation.error} title="Could not reattribute" />}
-
-        <div className="flex gap-2">
-          <Button variant="primary" disabled={!valid || mutation.isPending} onClick={submit}>
-            {mutation.isPending ? 'Submitting…' : 'Submit'}
-          </Button>
-          <Button onClick={onClose}>Cancel</Button>
-        </div>
+    <div className="app-col" style={{ gap: 10, maxWidth: 560 }}>
+      <div className="ss-label">
+        Reattribute SELL #{trade.id} · {fmt.qty(trade.quantity)} {trade.symbol} @ {fmt.price(trade.price)}
       </div>
-    </Dialog>
+      {lots.map((p) => (
+        <div key={p.id} className="app-alloc">
+          <span className="ss-n">#{p.id}</span>
+          <span className="ss-n ss-muted">
+            {fmt.date(p.opened_on)} · {fmt.qty(p.qty_total)} @ {fmt.price(p.avg_entry_price)}
+          </span>
+          <span className="ss-spacer" />
+          <input
+            aria-label={`Quantity from lot ${p.id}`}
+            className="ss-input ss-input-mono"
+            style={{ width: 90, textAlign: 'right' }}
+            type="number"
+            min="0"
+            value={alloc[p.id] ?? 0}
+            onChange={(e) => setAlloc((a) => ({ ...a, [p.id]: e.target.value }))}
+          />
+        </div>
+      ))}
+      <div className="app-row">
+        {err ? <span className="ss-down app-small">422 · {err}</span> : <span className="ss-up app-small">✓ Sums to {fmt.qty(trade.quantity)}</span>}
+        <span className="ss-spacer" />
+        <Button size="sm" variant="primary" disabled={!!err || mutation.isPending} onClick={submit}>
+          Submit allocation
+        </Button>
+      </div>
+      {mutation.isError ? <span className="ss-down app-small">{errorMessage(mutation.error)}</span> : null}
+    </div>
   )
 }

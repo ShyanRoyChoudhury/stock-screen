@@ -1,26 +1,19 @@
-// Handoff §5.7: Data & Ops (admin). Sections as Panels, top to bottom:
-// Health & Triggers -> Runs log -> Corporate actions browser.
+// app.jsx 577-612 (Data & Ops): pipeline runs, manual triggers, corporate actions. Order:
+// health dot in the page head, Triggers panel, the (unwrapped) runs table, Corporate actions panel.
 
-import { Panel } from '../../components/Panel'
-import { HealthStatus } from './Health'
-import { TriggersSection } from './Triggers'
+import { PageHead } from '../../ds'
+import { HealthDot } from './Health'
+import { Triggers } from './Triggers'
 import { RunsLog } from './RunsLog'
 import { CorporateActionsBrowser } from './CorporateActionsBrowser'
 
 export default function OpsPage() {
   return (
-    <div className="flex flex-col gap-3">
-      <h1 className="text-lg font-semibold">Data &amp; Ops</h1>
-
-      <Panel title="Health & Triggers">
-        <div className="flex flex-col gap-4">
-          <HealthStatus />
-          <div className="border-t border-border pt-3">
-            <TriggersSection />
-          </div>
-        </div>
-      </Panel>
-
+    <div className="ss-page">
+      <PageHead title="Data & Ops" sub="Pipeline runs, manual triggers and corporate actions">
+        <HealthDot />
+      </PageHead>
+      <Triggers />
       <RunsLog />
       <CorporateActionsBrowser />
     </div>

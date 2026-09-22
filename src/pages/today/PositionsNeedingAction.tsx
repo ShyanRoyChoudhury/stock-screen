@@ -1,127 +1,157 @@
-// Handoff §5.1: "Positions needing action" — counts by verdict, then EXIT/REVIEW/PARTIAL
-// positions with their reasons, HOLD collapsed below.
+// app.jsx 108-121: "Positions needing action" — the left column of Today. Open positions sorted
+// EXIT -> PARTIAL -> REVIEW, HOLD collapsed under a toggle. Needs an API key (positions are
+// per-user); per BUILD_BRIEF, this is the one place on Today that renders an ApiKeyPrompt for the
+// whole "positions column" (broker banners are simply skipped elsewhere when there's no key).
 
-import { Link } from 'react-router'
-import { usePositions } from '../../api/hooks'
-import { Panel } from '../../components/Panel'
-import { Chip } from '../../components/Chip'
-import { Loading } from '../../components/Loading'
-import { ErrorState } from '../../components/ErrorState'
-import { EmptyState } from '../../components/EmptyState'
-import { ApiKeyPrompt } from '../../components/ApiKeyPrompt'
-import { Tooltip } from '../../components/Tooltip'
-import { fmtInr, fmtFrac, signedClass } from '../../lib/format'
-import { reasonLabel, warningLabel } from '../../lib/domain'
+import { useState } from 'react'
+import { useNavigate } from 'react-router'
+import {
+  ApiKeyPrompt,
+  Badge,
+  Button,
+  CodeList,
+  type Column,
+  DataTable,
+  EmptyState,
+  ErrorState,
+  Loading,
+  Num,
+  Panel,
+  StrategyTag,
+  SymbolCell,
+  VerdictChip,
+  fmt,
+} from '../../ds'
+import { useBrokerAccounts, usePositions } from '../../api/hooks'
 import { useSettings } from '../../lib/settings'
-import type { Position, Verdict } from '../../api/types'
+import type { Position } from '../../api/types'
+import { VERDICT_ORDER, verdictOf } from './utils'
 
-// Stat-row and list order per the brief: EXIT, REVIEW, PARTIAL, HOLD (not VERDICT_META's order).
-const STAT_ORDER: Verdict[] = ['EXIT', 'REVIEW', 'PARTIAL', 'HOLD']
-const LIST_ORDER: Verdict[] = ['EXIT', 'REVIEW', 'PARTIAL']
-
-function verdictOf(p: Position): Verdict {
-  return p.latest_evaluation?.verdict ?? p.last_verdict ?? 'HOLD'
-}
-
-function PositionsList() {
-  const { data: positions, isLoading, isError, error } = usePositions('open')
-
-  if (isLoading) return <Loading label="Loading positions…" />
-  if (isError) return <ErrorState error={error} />
-  const rows = positions ?? []
-  if (rows.length === 0) return <EmptyState title="No open positions" />
-
-  const counts: Record<Verdict, number> = { EXIT: 0, PARTIAL: 0, REVIEW: 0, HOLD: 0 }
-  for (const p of rows) counts[verdictOf(p)]++
-
-  const actionable = rows
-    .filter((p) => LIST_ORDER.includes(verdictOf(p)))
-    .sort((a, b) => LIST_ORDER.indexOf(verdictOf(a)) - LIST_ORDER.indexOf(verdictOf(b)))
-  const holdRows = rows.filter((p) => verdictOf(p) === 'HOLD')
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap gap-4">
-        {STAT_ORDER.map((v) => (
-          <div key={v} className={`flex items-center gap-1.5 ${counts[v] === 0 ? 'opacity-50' : ''}`}>
-            <Chip variant="verdict" value={v} />
-            <span className="num text-sm font-semibold">{counts[v]}</span>
-          </div>
-        ))}
-      </div>
-
-      {actionable.length === 0 ? (
-        <p className="text-sm text-muted">Nothing needs action — every open position is HOLD.</p>
+const columns: Column<Position>[] = [
+  { key: 'verdict', label: 'Verdict', render: (p) => <VerdictChip verdict={verdictOf(p)} size="sm" /> },
+  { key: 'symbol', label: 'Symbol', render: (p) => <SymbolCell symbol={p.symbol} /> },
+  { key: 'qty', label: 'Qty', align: 'right', render: (p) => <Num kind="qty" value={p.qty_open} /> },
+  { key: 'close', label: 'Close ₹', align: 'right', render: (p) => <Num value={p.latest_evaluation?.close ?? null} /> },
+  {
+    key: 'pnl',
+    label: 'Unrl %',
+    align: 'right',
+    render: (p) => <Num kind="frac" value={p.latest_evaluation?.unrealized_pnl_pct ?? null} signed tone="auto" />,
+  },
+  {
+    key: 'why',
+    label: 'Why',
+    render: (p) => <CodeList reasons={p.latest_evaluation?.reasons ?? []} warnings={p.latest_evaluation?.warnings ?? []} showLabel={false} />,
+  },
+  {
+    key: 'matched',
+    label: 'Matched',
+    render: (p) =>
+      p.is_unmatched || !p.matched_strategy ? (
+        <Badge>Unmatched</Badge>
       ) : (
-        <ul className="flex flex-col gap-1.5">
-          {actionable.map((p) => {
-            const ev = p.latest_evaluation
-            const warnings = ev?.warnings ?? []
-            return (
-              <li key={p.id} className="flex flex-col gap-0.5 rounded border border-border px-2 py-1.5 text-sm">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Link to={`/positions/${p.id}`} className="font-medium text-accent hover:underline">
-                    {p.symbol}
-                  </Link>
-                  <Chip variant="verdict" value={verdictOf(p)} />
-                  {warnings.length > 0 && (
-                    <Tooltip text={warnings.map((w) => warningLabel(w.code)).join('; ')}>
-                      <span className="text-xs text-muted">
-                        {warnings.length} warning{warnings.length === 1 ? '' : 's'}
-                      </span>
-                    </Tooltip>
-                  )}
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-                  <span>{ev ? `${ev.days_held} day${ev.days_held === 1 ? '' : 's'} held` : '— days held'}</span>
-                  <span>·</span>
-                  {p.is_unmatched || !p.matched_strategy ? (
-                    <span>Unmatched</span>
-                  ) : (
-                    <Chip variant="strategy" value={p.matched_strategy} />
-                  )}
-                </div>
-                <div className="num flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
-                  <span>
-                    Close {fmtInr(ev?.close)} vs stop {fmtInr(ev?.stop_level)}
-                  </span>
-                  <span className={signedClass(ev?.unrealized_pnl_pct)}>{fmtFrac(ev?.unrealized_pnl_pct)}</span>
-                </div>
-                {ev && ev.reasons.length > 0 && (
-                  <p className="text-xs text-muted">{ev.reasons.map((r) => reasonLabel(r.code)).join('; ')}</p>
-                )}
-              </li>
-            )
-          })}
-        </ul>
-      )}
+        <StrategyTag strategy={p.matched_strategy} extra={p.match_confidence != null ? ` ${Math.round(p.match_confidence * 100)}%` : undefined} />
+      ),
+  },
+]
 
-      {holdRows.length > 0 && (
-        <details>
-          <summary className="cursor-pointer text-xs text-muted">
-            {holdRows.length} position{holdRows.length === 1 ? '' : 's'} on HOLD
-          </summary>
-          <ul className="mt-1.5 flex flex-col gap-1">
-            {holdRows.map((p) => (
-              <li key={p.id} className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted">
-                <Link to={`/positions/${p.id}`} className="text-accent hover:underline">
-                  {p.symbol}
-                </Link>
-                <span className="num">{fmtFrac(p.latest_evaluation?.unrealized_pnl_pct)}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-    </div>
-  )
-}
+function PositionsTable({ session }: { session: string }) {
+  const navigate = useNavigate()
+  const brokerAccounts = useBrokerAccounts()
+  const positions = usePositions('open')
+  const [showHold, setShowHold] = useState(false)
 
-export function PositionsNeedingAction() {
-  const { settings } = useSettings()
+  if (brokerAccounts.isLoading || positions.isLoading) {
+    return (
+      <Panel title="Positions">
+        <Loading label="Loading positions…" />
+      </Panel>
+    )
+  }
+  if (brokerAccounts.isError) {
+    return (
+      <Panel title="Positions">
+        <ErrorState error={brokerAccounts.error} />
+      </Panel>
+    )
+  }
+  if (positions.isError) {
+    return (
+      <Panel title="Positions">
+        <ErrorState error={positions.error} />
+      </Panel>
+    )
+  }
+
+  const accounts = brokerAccounts.data ?? []
+  if (accounts.length === 0) {
+    return (
+      <Panel title="Positions">
+        <EmptyState
+          title="No broker account linked"
+          action={
+            <Button variant="primary" onClick={() => navigate('/brokers?add=1')}>
+              Add Groww account
+            </Button>
+          }
+        >
+          Positions and verdicts start the evening after your first sync. You can also import a tradebook CSV.
+        </EmptyState>
+      </Panel>
+    )
+  }
+
+  const open = positions.data ?? []
+  if (open.length === 0) {
+    return (
+      <Panel title="Positions">
+        <EmptyState title="No open positions">Buys you place at the broker appear here after the next 16:15 IST sync.</EmptyState>
+      </Panel>
+    )
+  }
+
+  const act = open.filter((p) => verdictOf(p) !== 'HOLD').sort((a, b) => VERDICT_ORDER[verdictOf(a)] - VERDICT_ORDER[verdictOf(b)])
+  const hold = open.filter((p) => verdictOf(p) === 'HOLD')
+
   return (
-    <Panel title="Positions needing action">
-      {!settings.apiKey ? <ApiKeyPrompt message="Positions need an API key to load." /> : <PositionsList />}
+    <Panel
+      title="Positions needing action"
+      pad={false}
+      right={
+        <Button size="sm" variant="ghost" kbd="g p" onClick={() => navigate('/positions')}>
+          All positions
+        </Button>
+      }
+    >
+      {act.length ? (
+        <DataTable ariaLabel="Positions needing action" columns={columns} rows={act} rowKey={(p) => p.id} onRowOpen={(p) => navigate(`/positions/${p.id}`)} />
+      ) : (
+        <EmptyState title="Nothing to act on" glyph="· · ·">
+          All {hold.length} open positions say HOLD.
+        </EmptyState>
+      )}
+      <div className="ss-table-foot">
+        <button type="button" className="app-link" onClick={() => setShowHold((s) => !s)} aria-expanded={showHold}>
+          {showHold ? '▾' : '▸'} {hold.length} HOLD position{hold.length === 1 ? '' : 's'}
+        </button>
+        <span className="ss-spacer" />
+        <span>as of close {fmt.date(session)}</span>
+      </div>
+      {showHold ? (
+        <DataTable ariaLabel="HOLD positions" columns={columns} rows={hold} rowKey={(p) => p.id} onRowOpen={(p) => navigate(`/positions/${p.id}`)} />
+      ) : null}
     </Panel>
   )
+}
+
+export function PositionsNeedingAction({ session }: { session: string }) {
+  const { settings } = useSettings()
+  if (!settings.apiKey) {
+    return (
+      <Panel title="Positions">
+        <ApiKeyPrompt message="Positions and broker status need an API key to load." />
+      </Panel>
+    )
+  }
+  return <PositionsTable session={session} />
 }

@@ -1,108 +1,85 @@
-// Handoff §5.7: every job, with a live progress bar for `running` rows. The progress cell is
-// its own component so useRun(id, {poll:true}) is called per-row-component (a proper React
-// component instance) rather than inside DataTable's row-render loop, which would break the
-// rules of hooks.
+// app.jsx 588-596: the runs table, unwrapped (no Panel) between Triggers and Corporate actions,
+// exactly as the prototype lays it out. The currently-running run's counters are kept live: since
+// only one run can ever be active at a time, a single useRun(id, {poll:true}) at the table level
+// substitutes the polled row in place of the stale one from useRuns before rendering — equivalent
+// to a per-row live child component, without forking the shared DataTable to support row-level
+// component boundaries.
 
+import { type Column, DataTable, ErrorState, Loading, Num, StatusDot, TimeframeBadge, fmt } from '../../ds'
 import { useRun, useRuns } from '../../api/hooks'
-import { Panel } from '../../components/Panel'
-import { Chip } from '../../components/Chip'
-import { DataTable, type DataTableColumn } from '../../components/DataTable'
-import { Loading } from '../../components/Loading'
-import { ErrorState } from '../../components/ErrorState'
-import { EmptyState } from '../../components/EmptyState'
-import { fmtIstDateTime, fmtNum } from '../../lib/format'
-import { RUN_MODE_LABELS } from '../../lib/domain'
-import type { IngestRun, RunStatus } from '../../api/types'
-import { formatDuration } from './utils'
+import type { IngestRun, Timeframe } from '../../api/types'
 
-const STATUS_LABEL: Record<RunStatus, string> = {
-  running: 'Running',
-  completed: 'Completed',
-  failed: 'Failed',
-}
-
-function ProgressCell({ run }: { run: IngestRun }) {
-  const { data } = useRun(run.status === 'running' ? run.id : undefined, { poll: true })
-  const live = data ?? run
-  const total = live.symbols_total
-  const done = live.symbols_ok + live.symbols_failed
-  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
-  return (
-    <div className="flex items-center gap-2">
-      <div className="h-1.5 w-16 overflow-hidden rounded bg-surface-2">
-        <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
-      </div>
-      <span className="num text-xs text-muted">
-        {done}/{total}
-      </span>
-    </div>
-  )
-}
-
-const columns: DataTableColumn<IngestRun>[] = [
-  { key: 'id', header: 'Id', align: 'right', sortValue: (r) => r.id, render: (r) => r.id },
-  { key: 'mode', header: 'Mode', sortValue: (r) => r.mode, render: (r) => RUN_MODE_LABELS[r.mode] },
+const columns: Column<IngestRun>[] = [
+  { key: 'id', label: 'Run', render: (r) => <span className="ss-n">#{r.id}</span> },
+  { key: 'mode', label: 'Mode', render: (r) => <span className="ss-mono">{r.mode}</span> },
+  { key: 'status', label: 'Status', render: (r) => <StatusDot status={r.status} /> },
   {
-    key: 'status',
-    header: 'Status',
-    sortValue: (r) => r.status,
+    key: 'tf',
+    label: 'TF',
     render: (r) => (
-      <Chip variant="status" value={r.status}>
-        {STATUS_LABEL[r.status]}
-      </Chip>
+      <span className="app-row" style={{ gap: 4 }}>
+        {r.timeframes.map((t) => (
+          <TimeframeBadge key={t} timeframe={t as Timeframe} />
+        ))}
+      </span>
     ),
   },
-  { key: 'started', header: 'Started', sortValue: (r) => r.started_at, render: (r) => fmtIstDateTime(r.started_at) },
   {
-    key: 'finished',
-    header: 'Finished',
-    sortValue: (r) => r.finished_at ?? '',
-    render: (r) => fmtIstDateTime(r.finished_at),
+    key: 'started_at',
+    label: 'Started (IST)',
+    render: (r) => (
+      <span className="ss-n">
+        {fmt.date(r.started_at)} {fmt.time(r.started_at, false)}
+      </span>
+    ),
   },
-  { key: 'duration', header: 'Duration', render: (r) => formatDuration(r.started_at, r.finished_at) },
-  { key: 'timeframes', header: 'Timeframes', render: (r) => (r.timeframes.length ? r.timeframes.join(', ') : '—') },
-  { key: 'progress', header: 'Progress', render: (r) => <ProgressCell run={r} /> },
+  { key: 'dur', label: 'Took', align: 'right', render: (r) => <span className="ss-n">{r.finished_at ? fmt.dur(r.started_at, r.finished_at) : '…'}</span> },
   {
-    key: 'rows',
-    header: 'Rows written',
+    key: 'syms',
+    label: 'Symbols ok/total',
     align: 'right',
-    sortValue: (r) => r.candles_written,
-    render: (r) => fmtNum(r.candles_written, 0),
+    render: (r) => (
+      <span className="ss-n">
+        {r.symbols_ok}/{r.symbols_total}
+        {r.symbols_failed ? <span className="ss-down"> · {r.symbols_failed} failed</span> : null}
+      </span>
+    ),
   },
-  { key: 'message', header: 'Message', render: (r) => r.message ?? '—' },
+  { key: 'rows', label: 'Rows written', align: 'right', render: (r) => <Num kind="int" value={r.candles_written} /> },
+  { key: 'message', label: 'Message', render: (r) => <span className="ss-muted app-trunc app-trunc-l">{r.message}</span> },
 ]
 
 export function RunsLog() {
-  const { data: runs, isLoading, isError, error } = useRuns(50)
-  const rows = runs ?? []
+  const { data: runsData, isLoading, isError, error } = useRuns(50)
+  const runs = runsData ?? []
+  const runningId = runs.find((r) => r.status === 'running')?.id
+  const { data: liveRun } = useRun(runningId, { poll: true })
+  const rows = liveRun ? runs.map((r) => (r.id === liveRun.id ? liveRun : r)) : runs
+
+  if (isLoading) return <Loading label="Loading runs…" />
+  if (isError) return <ErrorState error={error} />
+  if (rows.length === 0) return <span className="ss-muted">No runs yet.</span>
 
   return (
-    <div id="runs-log" className="scroll-mt-16">
-      <Panel title="Runs log">
-        {isLoading && <Loading label="Loading runs…" />}
-        {isError && <ErrorState error={error} />}
-        {!isLoading && !isError && rows.length === 0 && <EmptyState title="No runs yet" />}
-        {!isLoading && !isError && rows.length > 0 && (
-          <DataTable
-            columns={columns}
-            rows={rows}
-            rowKey={(r) => r.id}
-            expandable={(r) =>
-              r.errors.length === 0 ? (
-                <p className="px-2 py-1 text-xs text-muted">No errors</p>
-              ) : (
-                <ul className="flex flex-col gap-0.5 px-2 py-1 text-xs">
-                  {r.errors.map((e, i) => (
-                    <li key={i}>
-                      {e.symbol ?? (e.position_id !== undefined ? `Position ${e.position_id}` : '—')}: {e.error}
-                    </li>
-                  ))}
-                </ul>
-              )
-            }
-          />
-        )}
-      </Panel>
-    </div>
+    <DataTable
+      ariaLabel="Runs"
+      columns={columns}
+      rows={rows}
+      rowKey={(r) => r.id}
+      renderExpanded={(r) =>
+        r.errors.length ? (
+          <div className="app-col" style={{ gap: 4 }}>
+            <span className="ss-label">Per-symbol errors</span>
+            {r.errors.map((e, i) => (
+              <span key={i} className="ss-mono app-small">
+                <b>{e.symbol ?? (e.position_id != null ? `Position ${e.position_id}` : '—')}</b> — {e.error}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <span className="ss-muted">{r.message || 'No errors.'}</span>
+        )
+      }
+    />
   )
 }

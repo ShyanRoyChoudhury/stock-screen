@@ -1,124 +1,100 @@
-// Handoff §5.7: filter by symbol/type/limit, browse the raw NSE corporate-action rows.
+// app.jsx 601-609: browse the raw NSE corporate-action rows, filtered server-side by symbol,
+// type and limit (KEEPS the current implementation's server-side filtering via useCorporateActions'
+// params, rather than the prototype's client-side filter over a fixed limit:500 fetch).
 
 import { useState } from 'react'
-import { Link } from 'react-router'
+import { useNavigate } from 'react-router'
+import { Badge, type Column, CorpActionMarker, DataTable, EmptyState, ErrorState, Loading, Menu, Num, Panel, fmt, labels } from '../../ds'
 import { useCorporateActions } from '../../api/hooks'
-import { Panel } from '../../components/Panel'
-import { Chip } from '../../components/Chip'
-import { Select } from '../../components/Select'
-import { Tooltip } from '../../components/Tooltip'
-import { DataTable, type DataTableColumn } from '../../components/DataTable'
-import { Loading } from '../../components/Loading'
-import { ErrorState } from '../../components/ErrorState'
-import { EmptyState } from '../../components/EmptyState'
-import { fmtInr, fmtIstDate, fmtNum } from '../../lib/format'
-import { ACTION_TYPE_LABELS } from '../../lib/domain'
 import type { ActionType, CorporateAction } from '../../api/types'
 
-function TypeChip({ type }: { type: ActionType }) {
-  const label = ACTION_TYPE_LABELS[type]
-  if (type === 'demerger') {
-    return (
-      <span
-        className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-warn px-1.5 py-0.5 text-xs font-medium text-warn"
-        style={{ backgroundColor: 'color-mix(in srgb, var(--color-warn) 12%, transparent)' }}
-        title="Prices are not demerger-adjusted; the chart may show a false cliff"
-      >
-        {label}
-      </span>
-    )
-  }
-  return <Chip variant="neutral">{label}</Chip>
+const TYPE_OPTIONS = (['dividend', 'split', 'bonus', 'rights', 'demerger'] as ActionType[]).map((t) => ({
+  value: t,
+  label: labels.actions[t][1],
+}))
+const LIMIT_OPTIONS = [50, 200, 500].map((n) => ({ value: n, label: String(n) }))
+
+function columns(navigate: ReturnType<typeof useNavigate>): Column<CorporateAction>[] {
+  return [
+    { key: 'ex_date', label: 'Ex-date', sortable: true, render: (a) => <span className="ss-n">{fmt.date(a.ex_date)}</span> },
+    {
+      key: 'symbol',
+      label: 'Symbol',
+      sortable: true,
+      render: (a) => (
+        <button
+          type="button"
+          className="app-link ss-sym"
+          onClick={(e) => {
+            e.stopPropagation()
+            navigate(`/symbols/${a.symbol}`)
+          }}
+        >
+          {a.symbol}
+        </button>
+      ),
+    },
+    { key: 'type', label: 'Type', render: (a) => <CorpActionMarker type={a.action_type} showLabel={false} /> },
+    { key: 'record_date', label: 'Record', render: (a) => <span className="ss-n ss-muted">{fmt.date(a.record_date ?? '')}</span> },
+    { key: 'value', label: 'Value ₹', align: 'right', render: (a) => <Num value={a.value} /> },
+    {
+      key: 'ratio',
+      label: 'Ratio',
+      align: 'right',
+      render: (a) => <span className="ss-n">{a.ratio_from != null && a.ratio_to != null ? `${fmt.qty(a.ratio_from)}:${fmt.qty(a.ratio_to)}` : '—'}</span>,
+    },
+    { key: 'pf', label: 'Price factor', align: 'right', render: (a) => <Num value={a.price_factor} decimals={4} /> },
+    { key: 'x', label: 'Extra', render: (a) => (a.is_extraordinary ? <Badge tone="warn">Extraordinary</Badge> : null) },
+    { key: 'subject', label: 'NSE subject', render: (a) => <span className="ss-muted">{a.subject}</span> },
+  ]
 }
 
-const LIMIT_OPTIONS = [
-  { value: '50', label: '50' },
-  { value: '200', label: '200' },
-  { value: '500', label: '500' },
-]
-
-const TYPE_OPTIONS = [
-  { value: '', label: 'All types' },
-  ...Object.entries(ACTION_TYPE_LABELS).map(([value, label]) => ({ value, label })),
-]
-
-const columns: DataTableColumn<CorporateAction>[] = [
-  {
-    key: 'symbol',
-    header: 'Symbol',
-    sortValue: (a) => a.symbol,
-    render: (a) => (
-      <Link to={`/symbols/${a.symbol}`} className="text-accent hover:underline">
-        {a.symbol}
-      </Link>
-    ),
-  },
-  { key: 'type', header: 'Type', sortValue: (a) => a.action_type, render: (a) => <TypeChip type={a.action_type} /> },
-  { key: 'ex_date', header: 'Ex-date', align: 'right', sortValue: (a) => a.ex_date, render: (a) => fmtIstDate(a.ex_date) },
-  {
-    key: 'record_date',
-    header: 'Record date',
-    align: 'right',
-    sortValue: (a) => a.record_date ?? '',
-    render: (a) => fmtIstDate(a.record_date),
-  },
-  { key: 'value', header: 'Value', align: 'right', sortValue: (a) => a.value ?? -Infinity, render: (a) => fmtInr(a.value) },
-  {
-    key: 'ratio',
-    header: 'Ratio',
-    align: 'right',
-    render: (a) => (a.ratio_from !== null && a.ratio_to !== null ? `${fmtNum(a.ratio_from, 0)}:${fmtNum(a.ratio_to, 0)}` : '—'),
-  },
-  {
-    key: 'price_factor',
-    header: 'Price factor',
-    align: 'right',
-    sortValue: (a) => a.price_factor ?? -Infinity,
-    render: (a) => (a.price_factor === null ? '—' : a.price_factor.toFixed(4)),
-  },
-  { key: 'extraordinary', header: 'Extraordinary', align: 'center', render: (a) => (a.is_extraordinary ? '✓' : '') },
-  { key: 'affects_shares', header: 'Affects shares', align: 'center', render: (a) => (a.affects_share_count ? '✓' : '') },
-  {
-    key: 'subject',
-    header: 'Subject',
-    render: (a) => (
-      <Tooltip text={a.subject}>
-        <span className="inline-block max-w-[240px] truncate align-bottom">{a.subject}</span>
-      </Tooltip>
-    ),
-  },
-]
-
 export function CorporateActionsBrowser() {
+  const navigate = useNavigate()
   const [symbol, setSymbol] = useState('')
-  const [actionType, setActionType] = useState('')
-  const [limit, setLimit] = useState('50')
+  const [actionType, setActionType] = useState<ActionType | null>(null)
+  const [limit, setLimit] = useState(50)
 
   const { data, isLoading, isError, error } = useCorporateActions({
     symbol: symbol.trim() ? symbol.trim().toUpperCase() : undefined,
-    action_type: actionType ? (actionType as ActionType) : undefined,
-    limit: Number(limit),
+    action_type: actionType ?? undefined,
+    limit,
   })
   const rows = data ?? []
 
   return (
-    <Panel title="Corporate actions browser">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <input
-          type="text"
-          placeholder="Symbol (exact)"
-          value={symbol}
-          onChange={(e) => setSymbol(e.target.value)}
-          className="rounded border border-border bg-surface px-2 py-1 text-sm"
+    <Panel
+      title="Corporate actions"
+      pad={false}
+      right={
+        <div className="app-row" style={{ gap: 8 }}>
+          <input
+            aria-label="Filter by symbol"
+            className="ss-input ss-input-mono"
+            style={{ width: 140 }}
+            placeholder="Symbol"
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value)}
+          />
+          <Menu label="Type" value={actionType} onChange={setActionType} onClear={() => setActionType(null)} options={TYPE_OPTIONS} />
+          <Menu label="Limit" value={limit} onChange={setLimit} options={LIMIT_OPTIONS} />
+        </div>
+      }
+    >
+      {isLoading ? (
+        <Loading label="Loading corporate actions…" />
+      ) : isError ? (
+        <ErrorState error={error} />
+      ) : rows.length === 0 ? (
+        <EmptyState title="No corporate actions match these filters" />
+      ) : (
+        <DataTable
+          ariaLabel="Corporate actions"
+          columns={columns(navigate)}
+          rows={rows}
+          rowKey={(a) => `${a.symbol}-${a.action_type}-${a.ex_date}`}
+          initialSort={{ key: 'ex_date', dir: 'desc' }}
         />
-        <Select value={actionType} onChange={setActionType} options={TYPE_OPTIONS} />
-        <Select value={limit} onChange={setLimit} options={LIMIT_OPTIONS} />
-      </div>
-      {isLoading && <Loading label="Loading corporate actions…" />}
-      {isError && <ErrorState error={error} />}
-      {!isLoading && !isError && rows.length === 0 && <EmptyState title="No corporate actions match these filters" />}
-      {!isLoading && !isError && rows.length > 0 && (
-        <DataTable columns={columns} rows={rows} rowKey={(a) => `${a.symbol}-${a.action_type}-${a.ex_date}`} />
       )}
     </Panel>
   )
