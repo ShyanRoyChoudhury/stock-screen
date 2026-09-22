@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict
 
@@ -48,3 +48,10 @@ class IngestRunOut(BaseModel):
     errors: list
     started_at: datetime
     finished_at: datetime | None
+
+
+class CorporateActionLoadRequest(BaseModel):
+    # Default range is set by the router: five years back to today.
+    from_date: date | None = None
+    to_date: date | None = None
+    symbols: list[str] | None = None

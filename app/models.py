@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -27,6 +28,14 @@ TIMEFRAMES = ("1h", "4h", "1d")
 #                  ex-dividend date, so stored rows drift out of date.
 PRICE_BASES = ("splits_only", "unadjusted", "total_return")
 PRICE_BASIS_DEFAULT = "splits_only"
+
+# Corporate action types that move the price. NSE publishes many more
+# (AGM, EGM, interest payments); those are filtered out at ingest.
+#   split / bonus  — self-contained, price_factor derivable from the action.
+#   dividend       — factor is 1 - value/prior_close, so needs a price.
+#   rights         — factor needs the theoretical ex-rights price.
+#   demerger       — NSE publishes no ratio; needs an external valuation.
+ACTION_TYPES = ("dividend", "split", "bonus", "rights", "demerger")
 
 
 class Symbol(Base):
@@ -78,6 +87,57 @@ class Candle(Base):
     )
 
     symbol_ref: Mapped[Symbol] = relationship(back_populates="candles")
+
+
+class CorporateAction(Base):
+    """A price-affecting corporate action, as published by NSE.
+
+    Stored structurally (amount, ratio) rather than as a finished price
+    factor, because a dividend's factor depends on the prior close and a
+    rights issue's on the market price — both are read-time context. Splits
+    and bonuses are self-contained, so `price_factor` is filled for those.
+
+    `subject` keeps NSE's raw text: the parser is heuristic over free-form
+    English, so every row must remain auditable against what NSE actually
+    said. One row per (symbol, ex_date, action_type); a compound record such
+    as "Interim Dividend - Rs 9 Per Share Special Dividend - Rs 18 Per Share"
+    is summed, which is correct for adjustment since Rs 27 goes ex that day.
+    """
+
+    __tablename__ = "corporate_actions"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol_id", "ex_date", "action_type", name="uq_corp_action"
+        ),
+        Index("ix_corp_actions_ex_date", "ex_date"),
+        Index("ix_corp_actions_symbol_ex", "symbol_id", "ex_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    symbol_id: Mapped[int] = mapped_column(ForeignKey("symbols.id"), index=True)
+    action_type: Mapped[str] = mapped_column(String(16))  # see ACTION_TYPES
+    ex_date: Mapped[date] = mapped_column(Date)
+    record_date: Mapped[date | None] = mapped_column(Date)
+
+    # Dividend: total rupees per share going ex on this date.
+    value: Mapped[float | None] = mapped_column(Float)
+    # Split: face value before/after. Bonus and rights: the a:b terms.
+    ratio_from: Mapped[float | None] = mapped_column(Float)
+    ratio_to: Mapped[float | None] = mapped_column(Float)
+    # Multiply prior prices by this. NULL when it needs price context
+    # (dividend, rights) or external valuation (demerger).
+    price_factor: Mapped[float | None] = mapped_column(Float)
+    # NSE adjusts F&O strikes and lot sizes for splits, bonuses and
+    # extraordinary dividends, but not ordinary ones.
+    is_extraordinary: Mapped[bool] = mapped_column(Boolean, default=False)
+    # True when the action affects share count, so volume needs adjusting too.
+    affects_share_count: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    subject: Mapped[str] = mapped_column(String(512))
+    source: Mapped[str] = mapped_column(String(16), default="nse")
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class IndicatorValue(Base):
