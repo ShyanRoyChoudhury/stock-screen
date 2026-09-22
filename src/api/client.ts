@@ -39,6 +39,11 @@ async function parseErrorMessage(res: Response): Promise<{ message: string; deta
 export async function apiFetch<T>(path: string, init: ApiInit = {}): Promise<T> {
   const { auth, body, headers, ...rest } = init
 
+  // The missing-key guard runs before the mock shortcut so Settings → Test
+  // behaves the same in mock mode as against the real API.
+  const key = auth ? getApiKey() : ''
+  if (auth && !key) throw new ApiError(401, 'No API key set')
+
   if (isMockMode() && isMockRoute(path)) {
     return mockFetch<T>(path, { method: rest.method ?? 'GET', body, auth })
   }
@@ -56,11 +61,7 @@ export async function apiFetch<T>(path: string, init: ApiInit = {}): Promise<T> 
     }
   }
 
-  if (auth) {
-    const key = getApiKey()
-    if (!key) throw new ApiError(401, 'No API key set')
-    finalHeaders.set('X-API-Key', key)
-  }
+  if (auth) finalHeaders.set('X-API-Key', key)
 
   const res = await fetch(`${API_BASE}${path}`, {
     ...rest,
