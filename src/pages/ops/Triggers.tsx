@@ -150,56 +150,88 @@ export function Triggers() {
       </div>
 
       <div className="app-toolbar" style={{ marginTop: 8 }}>
-        {ALL_TIMEFRAMES.map((tf) => (
-          <Toggle key={tf} on={timeframes.has(tf)} onClick={() => setTimeframes((prev) => toggleIn(prev, tf))}>
-            {tf}
-          </Toggle>
-        ))}
-        {ALL_STRATEGIES.map((s) => (
-          <Toggle key={s} on={strategies.has(s)} onClick={() => setStrategies((prev) => toggleIn(prev, s))}>
-            {s}
-          </Toggle>
-        ))}
-        <input
-          className="ss-input ss-input-mono"
-          style={{ width: 200 }}
-          aria-label="Symbols"
-          placeholder="RELIANCE,TCS (optional)"
-          value={symbolsText}
-          onChange={(e) => setSymbolsText(e.target.value)}
-        />
-        <span className="ss-muted app-small" title="Corporate actions load range">actions</span>
-        <input
-          type="date"
-          className="ss-input"
-          style={{ width: 148 }}
-          aria-label="Corporate actions from date"
-          title="Corporate actions: from date"
-          value={fromDate}
-          onChange={(e) => setFromDate(e.target.value)}
-        />
-        <span className="ss-muted app-small">to</span>
-        <input
-          type="date"
-          className="ss-input"
-          style={{ width: 148 }}
-          aria-label="Corporate actions to date"
-          title="Corporate actions: to date"
-          value={toDate}
-          onChange={(e) => setToDate(e.target.value)}
-        />
-        <span className="ss-muted app-small" title="Evaluate positions as of this date">
-          as of
-        </span>
-        <input
-          type="date"
-          className="ss-input"
-          style={{ width: 148 }}
-          aria-label="Evaluate as-of date"
-          title="Evaluate positions: as-of date (optional, defaults to the last trading day)"
-          value={asOf}
-          onChange={(e) => setAsOf(e.target.value)}
-        />
+        <div className="app-inline-field">
+          <span className="ss-label">Timeframes</span>
+          <div className="app-row" style={{ gap: 4 }}>
+            {ALL_TIMEFRAMES.map((tf) => (
+              <Toggle key={tf} on={timeframes.has(tf)} onClick={() => setTimeframes((prev) => toggleIn(prev, tf))}>
+                {tf}
+              </Toggle>
+            ))}
+          </div>
+        </div>
+
+        <div className="app-inline-field">
+          <span className="ss-label">
+            Strategies{' '}
+            <span className="ss-muted" style={{ textTransform: 'none', fontWeight: 400, letterSpacing: 'normal' }}>
+              none = all
+            </span>
+          </span>
+          <div className="app-row" style={{ gap: 4, flexWrap: 'wrap' }}>
+            {ALL_STRATEGIES.map((s) => (
+              <Toggle key={s} on={strategies.has(s)} onClick={() => setStrategies((prev) => toggleIn(prev, s))}>
+                {s}
+              </Toggle>
+            ))}
+          </div>
+        </div>
+
+        <div className="app-inline-field">
+          <label className="ss-label" htmlFor="trg-symbols">
+            Symbols
+          </label>
+          <input
+            id="trg-symbols"
+            className="ss-input ss-input-mono"
+            style={{ width: 200 }}
+            placeholder="RELIANCE,TCS (optional)"
+            value={symbolsText}
+            onChange={(e) => setSymbolsText(e.target.value)}
+          />
+        </div>
+
+        <div className="app-inline-field">
+          <span className="ss-label" title="Corporate actions load range">
+            Corporate actions
+          </span>
+          <div className="app-row" style={{ gap: 4 }}>
+            <input
+              type="date"
+              className="ss-input"
+              style={{ width: 130 }}
+              aria-label="Corporate actions from date"
+              title="Corporate actions: from date"
+              value={fromDate}
+              onChange={(e) => setFromDate(e.target.value)}
+            />
+            <span className="ss-muted app-small">→</span>
+            <input
+              type="date"
+              className="ss-input"
+              style={{ width: 130 }}
+              aria-label="Corporate actions to date"
+              title="Corporate actions: to date"
+              value={toDate}
+              onChange={(e) => setToDate(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="app-inline-field">
+          <label className="ss-label" htmlFor="trg-asof">
+            Evaluate as of
+          </label>
+          <input
+            id="trg-asof"
+            type="date"
+            className="ss-input"
+            style={{ width: 148 }}
+            title="Evaluate positions: as-of date (optional, defaults to the last trading day)"
+            value={asOf}
+            onChange={(e) => setAsOf(e.target.value)}
+          />
+        </div>
       </div>
 
       {evaluateNeedsKey ? (

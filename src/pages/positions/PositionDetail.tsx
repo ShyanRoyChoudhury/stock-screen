@@ -227,8 +227,8 @@ export function PositionDetail({ id }: { id: number }) {
                   ['Signal date', <span key="d" className="ss-n">{fmt.date(position.matched_signal_ts ?? '')}</span>],
                   [
                     'Confidence',
-                    <span key="c" className="ss-n">
-                      {(position.match_confidence ?? 0).toFixed(2)}
+                    <span key="c">
+                      <span className="ss-n">{(position.match_confidence ?? 0).toFixed(2)}</span>
                       {position.match_reason === 'manual' ? ' · manual' : ''}
                     </span>,
                   ],
@@ -254,8 +254,8 @@ export function PositionDetail({ id }: { id: number }) {
                 ['Avg entry (as paid)', <Num key="b" kind="inr" value={position.avg_entry_price_raw} />],
                 [
                   'Structural factor',
-                  <span key="f" className="ss-n">
-                    {(position.structural_factor_applied ?? 1).toFixed(4)}
+                  <span key="f">
+                    <span className="ss-n">{(position.structural_factor_applied ?? 1).toFixed(4)}</span>
                     {position.structural_factor_applied === 1 ? ' · no split/bonus since buy' : ''}
                   </span>,
                 ],

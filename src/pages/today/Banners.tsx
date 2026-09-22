@@ -13,11 +13,17 @@ import { useSettings } from '../../lib/settings'
 import type { BrokerAccount } from '../../api/types'
 import { expectedSyncDate } from './utils'
 
-function isAlerting(a: BrokerAccount, expected: string): boolean {
-  if (!a.active) return false
-  if (a.last_sync_status !== 'ok') return true
-  if (a.last_sync_on === null) return true
-  return a.last_sync_on < expected
+type AlertKind = 'failed' | 'stale' | 'never'
+
+/** Classifies why an active account is alerting, so the banner can say the right thing:
+ *  a hard failure (auth_failed/error), a sync that's simply behind schedule (status ok but
+ *  last_sync_on predates the expected session), or one that has never completed at all. */
+function alertKind(a: BrokerAccount, expected: string): AlertKind | null {
+  if (!a.active) return null
+  if (a.last_sync_status === 'auth_failed' || a.last_sync_status === 'error') return 'failed'
+  if (a.last_sync_on === null) return 'never'
+  if (a.last_sync_status === 'ok' && a.last_sync_on < expected) return 'stale'
+  return null
 }
 
 export function Banners({ session }: { session: string }) {
@@ -30,7 +36,11 @@ export function Banners({ session }: { session: string }) {
 
   const { data: accountsData } = useBrokerAccounts({ enabled: !!settings.apiKey })
   const expected = expectedSyncDate()
-  const alerting = settings.apiKey ? (accountsData ?? []).filter((a) => isAlerting(a, expected)) : []
+  const alerting = settings.apiKey
+    ? (accountsData ?? [])
+        .map((a) => ({ account: a, kind: alertKind(a, expected) }))
+        .filter((x): x is { account: BrokerAccount; kind: AlertKind } => x.kind !== null)
+    : []
 
   return (
     <>
@@ -47,20 +57,47 @@ export function Banners({ session }: { session: string }) {
           {running.symbols_ok}/{running.symbols_total} symbols. Triggers are disabled until it finishes.
         </Banner>
       ) : null}
-      {alerting.map((a) => (
-        <Banner
-          key={a.id}
-          tone="failed"
-          title={`Broker sync failed · ${a.label} (${a.broker}) · ${a.last_sync_status ?? 'stale'}`}
-          actions={
-            <Button variant="danger" size="sm" icon="upload" onClick={() => navigate(`/brokers?import=${a.id}`)}>
-              Import tradebook CSV
-            </Button>
-          }
-        >
-          {`Last good sync ${fmt.date(a.last_sync_on ?? '', true)}. Fills from ${fmt.date(session, true)} are lost to the API after today — upload the tradebook CSV before tomorrow’s 16:15 IST run.`}
-        </Banner>
-      ))}
+      {alerting.map(({ account: a, kind }) => {
+        const actions = (
+          <Button
+            variant={kind === 'failed' ? 'danger' : 'primary'}
+            size="sm"
+            icon="upload"
+            onClick={() => navigate(`/brokers?import=${a.id}`)}
+          >
+            Import tradebook CSV
+          </Button>
+        )
+        if (kind === 'failed') {
+          return (
+            <Banner
+              key={a.id}
+              tone="failed"
+              title={`Broker sync failed · ${a.label} (${a.broker}) · ${a.last_sync_status ?? 'error'}`}
+              actions={actions}
+            >
+              {`Last good sync ${fmt.date(a.last_sync_on ?? '', true)}. Fills from ${fmt.date(session, true)} are lost to the API after today — upload the tradebook CSV before tomorrow’s 16:15 IST run.`}
+            </Banner>
+          )
+        }
+        if (kind === 'stale') {
+          return (
+            <Banner
+              key={a.id}
+              tone="degraded"
+              title={`Broker sync behind · ${a.label} (${a.broker}) · last sync ${fmt.date(a.last_sync_on ?? '', true)}`}
+              actions={actions}
+            >
+              {`The ${fmt.date(expected, true)} session’s fills are not in the platform yet. Groww only serves the current day’s trades — upload the tradebook CSV before tomorrow’s 16:15 IST run.`}
+            </Banner>
+          )
+        }
+        return (
+          <Banner key={a.id} tone="degraded" title={`Broker never synced · ${a.label} (${a.broker})`} actions={actions}>
+            {`No sync has completed for this account yet. Groww only serves the current day’s trades — upload the tradebook CSV before tomorrow’s 16:15 IST run.`}
+          </Banner>
+        )
+      })}
       {ingest && ingest.status === 'failed' ? (
         <Banner tone="degraded" title={`Degraded: candle ingest failed for ${fmt.date(session, true)}`}>
           Signals and verdicts below ran on the previous session’s candles.

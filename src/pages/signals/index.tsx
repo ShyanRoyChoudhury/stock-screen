@@ -165,8 +165,9 @@ export default function SignalsPage() {
       label: 'Symbol',
       sortable: true,
       sortValue: (s) => s.symbol,
+      width: 158,
       render: (s) => (
-        <span className="app-row" style={{ gap: 6 }}>
+        <span className="app-row" style={{ gap: 6, flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
           <button
             type="button"
             className="app-link ss-sym"
@@ -183,11 +184,19 @@ export default function SignalsPage() {
         </span>
       ),
     },
-    { key: 'name', label: 'Name', render: (s) => <span className="ss-muted app-trunc">{symbolMap.get(s.symbol)?.name}</span> },
+    {
+      key: 'name',
+      label: 'Name',
+      // Confluence's "Confluence MODERATE"-style tag (see the strategy column below) needs more
+      // room than an event strategy key does, so the state tab borrows it from Name/Industry.
+      width: tab === 'state' ? 95 : 130,
+      render: (s) => <span className="ss-muted app-trunc">{symbolMap.get(s.symbol)?.name}</span>,
+    },
     {
       key: 'industry',
       label: 'Industry',
       sortable: true,
+      width: tab === 'state' ? 65 : 90,
       sortValue: (s) => symbolMap.get(s.symbol)?.industry ?? '',
       render: (s) => <span className="ss-muted app-trunc app-trunc-s">{symbolMap.get(s.symbol)?.industry}</span>,
     },
@@ -195,20 +204,22 @@ export default function SignalsPage() {
       key: 'strategy',
       label: 'Strategy',
       sortable: true,
+      width: tab === 'state' ? 172 : 118,
       sortValue: (s) => s.strategy,
       render: (s) => <StrategyTag strategy={s.strategy} extra={s.entry_mode || convictionExtra(s)} />,
     },
-    { key: 'tf', label: 'TF', render: (s) => <TimeframeBadge timeframe={s.timeframe} /> },
-    { key: 'ts', label: 'Signal date', sortable: true, sortValue: (s) => s.ts, render: (s) => <span className="ss-n">{fmt.date(s.ts)}</span> },
-    { key: 'entry', label: 'Entry ₹', align: 'right', sortable: true, sortValue: (s) => s.entry, render: (s) => <Num value={s.entry} /> },
-    { key: 'stop_loss', label: 'Stop', align: 'right', render: (s) => <Num value={s.stop_loss} /> },
-    { key: 'risk_pct', label: 'Risk %', align: 'right', sortable: true, sortValue: (s) => s.risk_pct ?? -Infinity, render: (s) => <RiskPct value={s.risk_pct} /> },
-    { key: 'target_1', label: 'T1', align: 'right', render: (s) => <Num value={s.target_1} /> },
-    { key: 'target_2', label: 'T2', align: 'right', render: (s) => <Num value={s.target_2} /> },
+    { key: 'tf', label: 'TF', width: 42, render: (s) => <TimeframeBadge timeframe={s.timeframe} /> },
+    { key: 'ts', label: 'Signal date', width: 108, sortable: true, sortValue: (s) => s.ts, render: (s) => <span className="ss-n">{fmt.date(s.ts)}</span> },
+    { key: 'entry', label: 'Entry ₹', align: 'right', width: 90, sortable: true, sortValue: (s) => s.entry, render: (s) => <Num value={s.entry} /> },
+    { key: 'stop_loss', label: 'Stop', align: 'right', width: 88, render: (s) => <Num value={s.stop_loss} /> },
+    { key: 'risk_pct', label: 'Risk %', align: 'right', width: 118, sortable: true, sortValue: (s) => s.risk_pct ?? -Infinity, render: (s) => <RiskPct value={s.risk_pct} /> },
+    { key: 'target_1', label: 'T1', align: 'right', width: 88, render: (s) => <Num value={s.target_1} /> },
+    { key: 'target_2', label: 'T2', align: 'right', width: 88, render: (s) => <Num value={s.target_2} /> },
     {
       key: 'rr',
       label: 'R:R',
       align: 'right',
+      width: 50,
       sortable: true,
       sortValue: (s) => rrOf(s) ?? -Infinity,
       title: '(T1 − entry) / (entry − stop), computed client-side',
@@ -284,31 +295,37 @@ export default function SignalsPage() {
       ) : rows.length === 0 ? (
         <EmptyState title="No signals match">Try widening the freshness window or clearing filters.</EmptyState>
       ) : (
-        <DataTable
-          key={tab + timeframe}
-          ariaLabel="Signals"
-          density={settings.density}
-          columns={cols}
-          rows={rows.slice(0, limit)}
-          rowKey={(s) => `${s.symbol}|${s.strategy}|${s.ts}`}
-          initialSort={{ key: 'ts', dir: 'desc' }}
-          rowClassName={(s) => (s.strategy === 'Confluence' && tab !== 'state' ? 'ss-dim' : undefined)}
-          renderExpanded={(s) => <SignalDetail signal={s} symbolName={symbolMap.get(s.symbol)?.name ?? undefined} />}
-          footer={
-            <>
-              <span>
-                {Math.min(limit, rows.length)} of {rows.length} shown
-              </span>
-              {rows.length > limit ? (
-                <Button size="sm" variant="ghost" onClick={() => setLimit((l) => l + 200)}>
-                  Show 200 more
-                </Button>
-              ) : null}
-              <span className="ss-spacer" />
-              <span className="app-hide-sm">R:R computed client-side · ↑↓ / j k move · ↵ expand</span>
-            </>
-          }
-        />
+        // app-tbl-fixed: pins every column to the width above (table-layout: fixed, scoped to
+        // this table in app.css) so all 12 columns fit at 1440px without the frame needing to
+        // scroll — the browser's default auto layout otherwise grows Name/Industry/Symbol past
+        // their intended caps and pushes T1/T2/R:R out of view (see final report).
+        <div className="app-tbl-fixed">
+          <DataTable
+            key={tab + timeframe}
+            ariaLabel="Signals"
+            density={settings.density}
+            columns={cols}
+            rows={rows.slice(0, limit)}
+            rowKey={(s) => `${s.symbol}|${s.strategy}|${s.ts}`}
+            initialSort={{ key: 'ts', dir: 'desc' }}
+            rowClassName={(s) => (s.strategy === 'Confluence' && tab !== 'state' ? 'ss-dim' : undefined)}
+            renderExpanded={(s) => <SignalDetail signal={s} symbolName={symbolMap.get(s.symbol)?.name ?? undefined} />}
+            footer={
+              <>
+                <span>
+                  {Math.min(limit, rows.length)} of {rows.length} shown
+                </span>
+                {rows.length > limit ? (
+                  <Button size="sm" variant="ghost" onClick={() => setLimit((l) => l + 200)}>
+                    Show 200 more
+                  </Button>
+                ) : null}
+                <span className="ss-spacer" />
+                <span className="app-hide-sm">R:R computed client-side · ↑↓ / j k move · ↵ expand</span>
+              </>
+            }
+          />
+        </div>
       )}
     </div>
   )

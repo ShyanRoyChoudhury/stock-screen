@@ -23,6 +23,13 @@ body { background: var(--bg); color: var(--ink); }
 .app-link:focus-visible, .app-toggle:focus-visible, .app-strat-row:focus-visible, .app-lot:focus-visible, .app-pop-item:focus-visible, .app-mnav button:focus-visible, .app-search-item:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .app-trunc { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .app-trunc-s { max-width: 150px; } .app-trunc-l { max-width: 420px; }
+/* Scoped to the Signals table (F3): table-layout: fixed so every column keeps the width the
+   page assigns it (auto layout otherwise grows to fit the widest cell in any row — a long
+   company name or a rare +CONF badge — and pushes T1/T2/R:R past the frame's right edge).
+   overflow: hidden is a safety net so an unexpectedly wide cell clips instead of bleeding
+   into its neighbour. */
+.app-tbl-fixed .ss-table { table-layout: fixed; }
+.app-tbl-fixed .ss-table th, .app-tbl-fixed .ss-table td { overflow: hidden; }
 .app-filters { display: flex; flex-wrap: wrap; gap: var(--space-6); align-items: center; }
 .app-menu { position: relative; display: inline-flex; }
 .app-pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 220px; max-height: 320px; overflow: auto; background: var(--surface-raised); box-shadow: var(--shadow-pop); border-radius: var(--radius-6); padding: 4px; }
