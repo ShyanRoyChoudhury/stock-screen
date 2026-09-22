@@ -11,6 +11,7 @@ calculation/signal layer comes next and will read candles from this DB.
 ```bash
 docker compose up -d            # Postgres 16 on localhost:5433
 .venv/bin/pip install -r requirements.txt
+.venv/bin/alembic upgrade head
 .venv/bin/uvicorn app.main:app --port 8000
 ```
 
@@ -47,5 +48,24 @@ session close) has passed.
 
 - `candles.ts` is the candle **start**, timezone-aware. Daily candles use
   09:15 IST (session open). Unique on `(symbol_id, timeframe, ts)`.
-- Prices are split-adjusted (yfinance `auto_adjust=True`).
+- Prices are split-adjusted, dividend-unadjusted (yfinance `auto_adjust=False`).
 - `ingest_runs` records every run's status, counts, and per-symbol errors.
+
+## Migrations
+
+Schema changes go through Alembic (`alembic/`), not `create_all()`. To make
+a change:
+
+1. Edit `app/models.py`.
+2. `.venv/bin/alembic revision --autogenerate -m "..."`
+3. Review the generated file in `alembic/versions/` — autogenerate is a
+   starting point, not the final word (it can miss things like data
+   backfills, and needs a manual look whenever a table has `use_alter`
+   foreign keys).
+4. `.venv/bin/alembic upgrade head`
+
+The app checks at startup that the DB is on the latest migration and
+refuses to start otherwise (see `app/main.py`). An existing pre-Alembic
+database — one whose tables were created by the old `create_all()` path —
+is adopted by stamping it at the baseline revision instead of replaying
+migrations against it: `.venv/bin/alembic stamp head`.
