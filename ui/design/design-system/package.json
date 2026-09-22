@@ -1,0 +1,8 @@
+{
+  "name": "stock-screen-design-system",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/entry.js --bundle --format=iife --jsx=transform --jsx-factory=React.createElement --jsx-fragment=React.Fragment --target=es2019 --charset=utf8 --outfile=components/bundle.js"
+  },
+  "devDependencies": { "esbuild": "^0.23.1" }
+}
