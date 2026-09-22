@@ -1,0 +1,9 @@
+{
+  "name": "stock-screen-prototype",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/app.jsx --bundle --format=iife --jsx-factory=React.createElement --jsx-fragment=React.Fragment --target=es2019 --charset=utf8 --outfile=public/app.js && cp src/app.css public/app.css",
+    "serve": "python3 -m http.server 5173 --directory public"
+  },
+  "devDependencies": { "esbuild": "^0.23.1" }
+}
