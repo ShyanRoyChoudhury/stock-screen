@@ -236,8 +236,24 @@ def load_actions(
             "source": "nse",
         })
 
-    # One row per (symbol, ex_date, action_type); the last wins within a batch.
-    deduped = {(r["symbol_id"], r["ex_date"], r["action_type"]): r for r in rows}
+    # One row per (symbol, ex_date, action_type). NSE often publishes several
+    # dividends going ex the same day as SEPARATE records — NESTLEIND's
+    # 2023-04-21 is "Interim Rs 27" and "Final Rs 75" in two rows. Last-wins
+    # would keep Rs 75 and lose Rs 27, understating the factor. What leaves
+    # the company that day is the total, so dividends are summed.
+    deduped: dict[tuple, dict] = {}
+    for r in rows:
+        key = (r["symbol_id"], r["ex_date"], r["action_type"])
+        prev = deduped.get(key)
+        if prev is None:
+            deduped[key] = r
+        elif r["action_type"] == "dividend":
+            prev["value"] = (prev["value"] or 0.0) + (r["value"] or 0.0)
+            prev["is_extraordinary"] = (
+                prev["is_extraordinary"] or r["is_extraordinary"])
+            prev["subject"] = f"{prev['subject']} + {r['subject']}"[:512]
+        # Two structural actions on one ex-date would be an NSE anomaly;
+        # keep the first and let the raw subject show what happened.
     written = 0
     if deduped:
         stmt = pg_insert(CorporateAction).values(list(deduped.values()))
