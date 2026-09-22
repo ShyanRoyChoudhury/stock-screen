@@ -18,6 +18,16 @@ from app.db import Base
 
 TIMEFRAMES = ("1h", "4h", "1d")
 
+# Adjustment conventions a stored price series can be on.
+#   splits_only  — split/bonus adjusted, dividends left in the price.
+#                  yfinance auto_adjust=False, and TradingView's native basis.
+#   unadjusted   — raw traded prices, nothing applied. NSE bhavcopy.
+#   total_return — splits and dividends both removed (yfinance auto_adjust=True).
+#                  Not stored: Yahoo re-scales it retroactively on every
+#                  ex-dividend date, so stored rows drift out of date.
+PRICE_BASES = ("splits_only", "unadjusted", "total_return")
+PRICE_BASIS_DEFAULT = "splits_only"
+
 
 class Symbol(Base):
     __tablename__ = "symbols"
@@ -56,6 +66,13 @@ class Candle(Base):
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[int] = mapped_column(BigInteger)
     source: Mapped[str] = mapped_column(String(16), default="yfinance")
+    # Which adjustment convention these prices are on. NOT part of uq_candle:
+    # one basis is canonical at a time, and re-ingesting on a different basis
+    # should overwrite rather than duplicate. The column exists so a partially
+    # completed re-ingest can be detected instead of silently mixing bases.
+    price_basis: Mapped[str] = mapped_column(
+        String(16), default=PRICE_BASIS_DEFAULT, server_default=PRICE_BASIS_DEFAULT
+    )
     inserted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

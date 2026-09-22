@@ -8,11 +8,12 @@ everywhere, not sampled):
   4. Symbols with daily data but no hourly (coverage gaps)
 
 Layer 2 — external validation, SAMPLED: daily candles vs NSE's official
-bhavcopy (UDiFF) for sampled dates and symbols. Caveat: our prices are
-yfinance auto_adjust=True (dividend/split adjusted); bhavcopy is unadjusted.
-On the latest trading day they must match exactly; on older dates a stock
-with an ex-dividend/split in between will differ by the adjustment factor —
-reported, not failed.
+bhavcopy (UDiFF) for sampled dates and symbols. Our prices are yfinance
+auto_adjust=False — split-adjusted, NOT dividend-adjusted — while bhavcopy is
+unadjusted for everything. So dividends no longer explain a mismatch on any
+date: only a split, bonus, demerger or rights issue between the sampled date
+and today should move our price away from the official one. Splits are looked
+up and exempted; anything else that differs is a real failure.
 
 Run: .venv/bin/python scripts/validate.py
 """
@@ -26,6 +27,7 @@ import zipfile
 from datetime import timedelta
 
 import pandas as pd
+import yfinance as yf
 from sqlalchemy import text
 
 sys.path.insert(0, ".")
@@ -184,8 +186,41 @@ def fetch_bhavcopy(day) -> pd.DataFrame | None:
     return df.set_index("TckrSymb")
 
 
+def split_ratio_since(symbol: str, day) -> float:
+    """Cumulative split ratio applied to `symbol` strictly after `day`.
+
+    Interim source: yfinance carries splits but NOT bonuses, demergers or
+    rights issues, so those still surface as unexplained until the
+    corporate-actions table lands. Returns 1.0 when unknown."""
+    try:
+        sp = yf.Ticker(f"{symbol}.NS").splits
+    except Exception:
+        return 1.0
+    if sp is None or len(sp) == 0:
+        return 1.0
+    idx = pd.to_datetime(sp.index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    ratio = 1.0
+    for when, value in zip(idx, sp.values):
+        if when.date() > day and float(value) > 0:
+            ratio *= float(value)
+    return ratio
+
+
 SAMPLE_N = 15
 PRICE_TOL = 0.0005  # 0.05% — covers paise rounding
+PAIRS = [("open", "OpnPric"), ("high", "HghPric"),
+         ("low", "LwPric"), ("close", "ClsPric")]
+
+
+def matches(ours, official, ratio=1.0):
+    """Our stored prices are split-adjusted, bhavcopy is raw, so a split after
+    the sampled date divides ours by its cumulative ratio."""
+    return all(
+        abs(ours[a] - official[b] / ratio) / (official[b] / ratio) <= PRICE_TOL
+        for a, b in PAIRS
+    )
 
 t_last = last_trading_day()
 older = last_trading_day(t_last - timedelta(days=21))
@@ -208,41 +243,46 @@ for day, label in [(t_last, "latest trading day"), (older, "~3 weeks back")]:
     if "RELIANCE" in common and "RELIANCE" not in sample:
         sample[0] = "RELIANCE"
 
-    exact = price_off = vol_off = 0
+    exact = vol_off = 0
+    unexplained, split_exempt = set(), set()
     for sym in sample:
         ours, official = db.loc[sym], bhav.loc[sym]
-        price_ok = all(
-            abs(ours[a] - official[b]) / official[b] <= PRICE_TOL
-            for a, b in [("open", "OpnPric"), ("high", "HghPric"),
-                         ("low", "LwPric"), ("close", "ClsPric")]
-        )
+        price_ok = matches(ours, official)
         vol_ok = (official["TtlTradgVol"] > 0 and
                   abs(ours["volume"] - official["TtlTradgVol"])
                   / official["TtlTradgVol"] <= 0.02)
         if price_ok and vol_ok:
             exact += 1
-        else:
-            if not price_ok:
-                price_off += 1
-            if not vol_ok:
-                vol_off += 1
-            print(f"       DIFF {sym} ({day}): "
-                  f"close ours={ours['close']:.2f} "
-                  f"nse={official['ClsPric']:.2f} "
-                  f"({(ours['close']/official['ClsPric']-1)*100:+.2f}%), "
-                  f"vol ours={ours['volume']:,} "
-                  f"nse={official['TtlTradgVol']:,.0f}")
+            continue
+        if not price_ok:
+            # A split between `day` and today is the one legitimate reason our
+            # split-adjusted price differs from the raw official one. Require
+            # the gap to actually equal that ratio, not merely that one exists.
+            ratio = split_ratio_since(sym, day)
+            if ratio != 1.0 and matches(ours, official, ratio):
+                split_exempt.add(sym)
+            else:
+                unexplained.add(sym)
+        if not vol_ok:
+            vol_off += 1
+        print(f"       DIFF {sym} ({day}): "
+              f"close ours={ours['close']:.2f} "
+              f"nse={official['ClsPric']:.2f} "
+              f"({(ours['close']/official['ClsPric']-1)*100:+.2f}%), "
+              f"vol ours={ours['volume']:,} "
+              f"nse={official['TtlTradgVol']:,.0f}")
 
     detail = (f"{day} ({label}): {exact}/{len(sample)} match "
               f"(price tol {PRICE_TOL:.2%}, volume tol 2%)")
-    # exact match is required on the latest day; older dates may legitimately
-    # carry dividend adjustments, so only report there.
-    if day == t_last:
-        check(f"Bhavcopy match on {label}", price_off == 0, detail)
-        check(f"Bhavcopy volume match on {label}", vol_off == 0, detail)
-    else:
-        print(f"[INFO] {detail} — diffs on older dates can be legitimate "
-              "dividend/split adjustments")
+    if unexplained:
+        detail += f"; unexplained: {', '.join(sorted(unexplained))}"
+    if split_exempt:
+        detail += f"; split/bonus exempt: {', '.join(sorted(split_exempt))}"
+    # Under auto_adjust=False a dividend no longer shifts our prices, so both
+    # dates are held to the same bar: every mismatch must be explained by a
+    # split (looked up per symbol above) or it is a genuine data fault.
+    check(f"Bhavcopy price match on {label}", not unexplained, detail)
+    check(f"Bhavcopy volume match on {label}", vol_off == 0, detail)
 
 print()
 print("=" * 70)
