@@ -35,6 +35,24 @@ curl "localhost:8000/candles/RELIANCE?timeframe=4h&limit=10"
 - Optional `"symbols": ["RELIANCE", ...]` restricts a run (useful for testing);
   `"timeframes": ["1h","4h","1d"]` restricts timeframes.
 
+## Web UI
+
+`ui/` is the front end (Vite + React + TypeScript), built to `docs/UI_HANDOFF.md`
+and the design system vendored in `ui/design/`. It talks to this service through
+the Vite dev proxy, so no CORS config is needed in development:
+
+```bash
+cd ui && npm install
+npm run dev            # http://localhost:5173, proxies /api -> :8000
+VITE_MOCK=1 npm run dev  # fixture positions/brokers, for screens the DB can't fill yet
+```
+
+Authenticated screens need an API key (`scripts/create_user.py` prints one);
+paste it into Settings, or put it in `ui/.env.local` as `VITE_DEV_API_KEY`.
+`npm run build` emits `ui/dist/`. A deployed build must be served from this
+service's origin (or the service needs CORS middleware) — see §11 of the handoff
+for the other gaps the UI works around.
+
 ## Market closes / holidays
 
 Two layers: `app/market_calendar.py` (exchange_calendars XBOM — the Indian

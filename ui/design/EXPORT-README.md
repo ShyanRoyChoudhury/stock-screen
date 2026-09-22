@@ -1,6 +1,6 @@
 # Stock Screen UI
 
-Front end for the Stock Screen backend (FastAPI, `http://localhost:8000`). The backend brief is `UI_HANDOFF.md`.
+Front end for the Stock Screen backend (FastAPI, `http://localhost:8000`). The backend brief is `../../docs/UI_HANDOFF.md`.
 
 ## Layout
 - `design-system/` — the source of truth for look and behaviour.

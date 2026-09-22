@@ -1,6 +1,6 @@
 # Stock Screen UI
 
-Web front end for Stock Screen (see `BUILD_BRIEF.md` and `docs/UI_HANDOFF.md`).
+Web front end for Stock Screen (see `BUILD_BRIEF.md` and [`../docs/UI_HANDOFF.md`](../docs/UI_HANDOFF.md)).
 
 ## Run
 
@@ -75,7 +75,7 @@ backend needs CORS middleware); in development the Vite proxy handles it.
 
 ## Known backend gaps the UI works around
 
-See `docs/UI_HANDOFF.md` §11. In short: no login flow (raw API key), no
+See `../docs/UI_HANDOFF.md` §11. In short: no login flow (raw API key), no
 daily-job summary endpoint (Today reconstructs it from `/ingest/runs`), no
 read endpoints for holdings snapshots or sell allocations, `/signals/fresh`
 is unpaginated (always filtered by timeframe here), and `Trade` rows carry no

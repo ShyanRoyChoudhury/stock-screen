@@ -1,6 +1,6 @@
 # Build brief — Stock Screen UI
 
-The product spec is `docs/UI_HANDOFF.md`. **This file is the engineering contract**: stack, layout, tokens, API types, conventions. When the two disagree on engineering matters, this file wins; on product matters (what a screen shows), the handoff wins.
+The product spec is `../docs/UI_HANDOFF.md` (one copy, at the repo root). **This file is the engineering contract**: stack, layout, tokens, API types, conventions. When the two disagree on engineering matters, this file wins; on product matters (what a screen shows), the handoff wins.
 
 Backend: FastAPI on `http://localhost:8000` (already running). The UI talks to it through the Vite dev proxy at `/api/*` (no CORS on the backend). All backend responses are JSON; errors are `{ "detail": string | object[] }`.
 
