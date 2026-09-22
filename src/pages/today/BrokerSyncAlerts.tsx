@@ -1,5 +1,7 @@
-// Handoff §5.1 + §2: an account is alerting when its sync is broken, missing, or stale on a
-// trading weekday. Groww only returns today's trades, so a failed sync must be acted on today.
+// Handoff §5.1 + §2: an account is alerting when its sync is broken, missing, or older than the
+// expected sync date (see `expectedSyncDate` in ./utils — the trading day whose sync should
+// already be complete, which lags by a day until 16:30 IST so a mid-day check doesn't cry wolf).
+// Groww only returns today's trades, so a failed/missing sync must be acted on before it rolls off.
 
 import { Link, useNavigate } from 'react-router'
 import { useBrokerAccounts } from '../../api/hooks'
@@ -13,16 +15,15 @@ import { ApiKeyPrompt } from '../../components/ApiKeyPrompt'
 import { fmtIstDate } from '../../lib/format'
 import { useSettings } from '../../lib/settings'
 import type { BrokerAccount } from '../../api/types'
-import { isIstWeekday, todayIstKey } from './utils'
+import { expectedSyncDate } from './utils'
 
 const SYNC_STATUS_LABEL: Record<string, string> = { ok: 'OK', auth_failed: 'Auth failed', error: 'Error' }
 
-function isAlerting(a: BrokerAccount, todayKey: string, weekday: boolean): boolean {
+function isAlerting(a: BrokerAccount, expected: string): boolean {
   if (!a.active) return false
   if (a.last_sync_status !== 'ok') return true
   if (a.last_sync_on === null) return true
-  if (weekday && a.last_sync_on < todayKey) return true
-  return false
+  return a.last_sync_on < expected
 }
 
 function AccountsList() {
@@ -45,43 +46,55 @@ function AccountsList() {
     )
   }
 
-  const todayKey = todayIstKey()
-  const weekday = isIstWeekday()
-  const alerting = rows.filter((a) => isAlerting(a, todayKey, weekday))
+  const expected = expectedSyncDate()
+  const alerting = rows.filter((a) => isAlerting(a, expected))
+  const okRows = rows.filter((a) => a.active && !isAlerting(a, expected))
 
-  if (alerting.length === 0) {
-    const dates = rows.filter((a) => a.active && a.last_sync_on).map((a) => a.last_sync_on as string)
-    const latest = dates.length ? [...dates].sort().at(-1) : null
-    return (
-      <p className="text-sm text-up">
-        All {rows.length} account{rows.length === 1 ? '' : 's'} synced{latest ? ` ${fmtIstDate(latest)}` : ''}.
-      </p>
-    )
+  if (alerting.length === 0 && okRows.length === 0) {
+    return <EmptyState title="No active broker accounts" />
   }
 
   return (
-    <ul className="flex flex-col gap-2">
-      {alerting.map((a) => (
-        <li key={a.id} className="flex flex-col gap-1 rounded border border-warn bg-surface-2 px-2 py-1.5 text-sm">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium">{a.label}</span>
-            <Chip variant="status" value={a.last_sync_status ?? 'never'}>
-              {a.last_sync_status ? (SYNC_STATUS_LABEL[a.last_sync_status] ?? a.last_sync_status) : 'Never synced'}
-            </Chip>
-            <span className="text-xs text-muted">
-              {a.last_sync_on ? `Last sync ${fmtIstDate(a.last_sync_on)}` : 'Never synced'}
-            </span>
-          </div>
-          {a.last_sync_message && <p className="text-xs text-muted">{a.last_sync_message}</p>}
-          <p className="text-xs text-muted">
-            Groww returns only today's trades — if today's sync failed, import the tradebook CSV before tomorrow.
-          </p>
-          <Button size="sm" variant="primary" className="w-fit" onClick={() => navigate('/brokers')}>
-            Import tradebook CSV
-          </Button>
-        </li>
-      ))}
-    </ul>
+    <div className="flex flex-col gap-3">
+      {alerting.length > 0 && (
+        <ul className="flex flex-col gap-2">
+          {alerting.map((a) => (
+            <li key={a.id} className="flex flex-col gap-1 rounded border border-warn bg-surface-2 px-2 py-1.5 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">{a.label}</span>
+                <Chip variant="status" value={a.last_sync_status ?? 'never'}>
+                  {a.last_sync_status ? (SYNC_STATUS_LABEL[a.last_sync_status] ?? a.last_sync_status) : 'Never synced'}
+                </Chip>
+                <span className="text-xs text-muted">
+                  {a.last_sync_on ? `Last sync ${fmtIstDate(a.last_sync_on)}` : 'Never synced'}
+                </span>
+              </div>
+              {a.last_sync_message && <p className="text-xs text-muted">{a.last_sync_message}</p>}
+              <p className="text-xs text-muted">
+                Groww returns only today's trades — if today's sync failed, import the tradebook CSV before tomorrow.
+              </p>
+              <Button size="sm" variant="primary" className="w-fit" onClick={() => navigate('/brokers')}>
+                Import tradebook CSV
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {okRows.length > 0 && (
+        <ul className="flex flex-col gap-1">
+          {okRows.map((a) => (
+            <li key={a.id} className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="font-medium">{a.label}</span>
+              <Chip variant="status" value="ok">
+                OK
+              </Chip>
+              <span className="text-xs text-muted">synced {fmtIstDate(a.last_sync_on)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }
 

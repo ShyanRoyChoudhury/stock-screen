@@ -72,6 +72,15 @@ function PositionsList() {
                     </Tooltip>
                   )}
                 </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+                  <span>{ev ? `${ev.days_held} day${ev.days_held === 1 ? '' : 's'} held` : '— days held'}</span>
+                  <span>·</span>
+                  {p.is_unmatched || !p.matched_strategy ? (
+                    <span>Unmatched</span>
+                  ) : (
+                    <Chip variant="strategy" value={p.matched_strategy} />
+                  )}
+                </div>
                 <div className="num flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
                   <span>
                     Close {fmtInr(ev?.close)} vs stop {fmtInr(ev?.stop_level)}

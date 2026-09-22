@@ -76,6 +76,15 @@ export function groupBySymbol(positions: Position[]): SymbolGroup[] {
   return groups.sort((a, b) => verdictRank(a.worstVerdict) - verdictRank(b.worstVerdict))
 }
 
+/** Latest `last_evaluated_on` across a set of positions (max date string), or null if none evaluated. */
+export function maxEvaluatedOn(positions: Position[]): string | null {
+  let max: string | null = null
+  for (const p of positions) {
+    if (p.last_evaluated_on && (max === null || p.last_evaluated_on > max)) max = p.last_evaluated_on
+  }
+  return max
+}
+
 /** Win rate (%) across closed positions with a recorded realised P&L. Null if there are none. */
 export function winRate(positions: Position[]): number | null {
   const closed = positions.filter((p) => p.status === 'closed' && p.realized_pnl !== null)

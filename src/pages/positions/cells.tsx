@@ -7,17 +7,17 @@ import { fmtInr, fmtPct } from '../../lib/format'
 import { reasonLabel, warningLabel } from '../../lib/domain'
 import type { Position, ReasonCode } from '../../api/types'
 
-/** Reason codes as small labelled chips; hovering one shows its `detail` text. */
+/** Reason codes joined into a sentence, clamped to two lines with a title tooltip carrying the
+ *  full text — some labels (e.g. DEMERGER_CLIFF) are full sentences that would otherwise force
+ *  the whole row wide against the table's default `white-space: nowrap` cells. */
 export function ReasonsInline({ reasons }: { reasons: ReasonCode[] }) {
   if (reasons.length === 0) return <span className="text-muted">—</span>
+  const short = reasons.map((r) => reasonLabel(r.code)).join('; ')
+  const full = reasons.map((r) => (r.detail ? `${reasonLabel(r.code)} — ${r.detail}` : reasonLabel(r.code))).join('; ')
   return (
-    <span className="flex flex-wrap gap-1">
-      {reasons.map((r, i) => (
-        <Tooltip key={`${r.code}-${i}`} text={r.detail ?? reasonLabel(r.code)}>
-          <span className="text-xs">{reasonLabel(r.code)}</span>
-        </Tooltip>
-      ))}
-    </span>
+    <div className="line-clamp-2 max-w-[260px] whitespace-normal text-xs leading-snug" title={full}>
+      {short}
+    </div>
   )
 }
 

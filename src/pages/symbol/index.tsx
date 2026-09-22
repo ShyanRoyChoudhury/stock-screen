@@ -80,6 +80,14 @@ export default function SymbolPage() {
   const signals = useMemo(() => signalsQuery.data ?? [], [signalsQuery.data])
   const actions = useMemo(() => actionsQuery.data ?? [], [actionsQuery.data])
 
+  // The signals table is otherwise dominated by Confluence rows (it fires on ~23%
+  // of bars). Tied to the same "Include Confluence" toggle that controls the chart
+  // markers; API order is already newest-first, so filtering preserves it.
+  const tableSignals = useMemo(
+    () => (toggles.showConfluenceMarkers ? signals : signals.filter((s) => s.strategy !== 'Confluence')),
+    [signals, toggles.showConfluenceMarkers],
+  )
+
   const demergers = useMemo(() => actions.filter((a) => a.action_type === 'demerger'), [actions])
 
   const tokens = readChartTokens()
@@ -143,7 +151,7 @@ export default function SymbolPage() {
       />
 
       {chartLoading ? (
-        <div className="flex items-center justify-center rounded border border-border bg-surface" style={{ height: 480 }}>
+        <div className="flex items-center justify-center rounded border border-border bg-surface" style={{ height: 640 }}>
           <Loading label="Loading chart…" />
         </div>
       ) : chartError ? (
@@ -151,16 +159,18 @@ export default function SymbolPage() {
       ) : candles.length === 0 ? (
         <EmptyState title="No candles" message={`No ${timeframe} candles for ${symbol}.`} />
       ) : (
-        <CandleChart
-          candles={candles}
-          indicators={indicators}
-          timeframe={timeframe}
-          overlays={toggles.overlays}
-          panes={toggles.panes}
-          markers={markers}
-          priceLines={priceLines}
-          height={480}
-        />
+        <div className="overflow-hidden rounded border border-border bg-surface">
+          <CandleChart
+            candles={candles}
+            indicators={indicators}
+            timeframe={timeframe}
+            overlays={toggles.overlays}
+            panes={toggles.panes}
+            markers={markers}
+            priceLines={priceLines}
+            height={640}
+          />
+        </div>
       )}
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -170,7 +180,7 @@ export default function SymbolPage() {
           ) : signalsQuery.isError ? (
             <ErrorState error={signalsQuery.error} />
           ) : (
-            <SignalsPanel signals={signals} selectedKey={selectedSignal ? keyOf(selectedSignal) : null} onSelect={setSelectedSignal} />
+            <SignalsPanel signals={tableSignals} selectedKey={selectedSignal ? keyOf(selectedSignal) : null} onSelect={setSelectedSignal} />
           )}
         </Panel>
         <Panel title="Corporate actions">

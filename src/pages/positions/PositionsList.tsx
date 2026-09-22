@@ -20,7 +20,18 @@ import { ErrorState } from '../../components/ErrorState'
 import { Loading } from '../../components/Loading'
 import { ApiKeyPrompt } from '../../components/ApiKeyPrompt'
 import { ReasonsInline, WarningsBadge, AvgEntryCell, MatchCell } from './cells'
-import { VERDICT_PRECEDENCE, verdictRank, positionVerdict, sortByVerdict, unrealizedInr, groupBySymbol, winRate, daysBetween, type SymbolGroup } from './helpers'
+import {
+  VERDICT_PRECEDENCE,
+  verdictRank,
+  positionVerdict,
+  sortByVerdict,
+  unrealizedInr,
+  groupBySymbol,
+  winRate,
+  maxEvaluatedOn,
+  daysBetween,
+  type SymbolGroup,
+} from './helpers'
 
 type Status = 'open' | 'closed'
 
@@ -57,6 +68,8 @@ export function PositionsList() {
   const totalUnrealized = useMemo(() => sorted.reduce((s, p) => s + (unrealizedInr(p) ?? 0), 0), [sorted])
   const totalRealized = useMemo(() => sorted.reduce((s, p) => s + (p.realized_pnl ?? 0), 0), [sorted])
   const rate = useMemo(() => winRate(sorted), [sorted])
+  // "Open lots" here is exactly `sorted` when status === 'open' (the branch this is shown in).
+  const lastEvaluated = useMemo(() => maxEvaluatedOn(sorted), [sorted])
 
   if (!settings.apiKey) return <ApiKeyPrompt message="Positions needs your API key to load your book." />
   if (isLoading) return <Loading label="Loading positions…" />
@@ -122,7 +135,7 @@ export function PositionsList() {
       sortValue: (p) => verdictRank(positionVerdict(p)),
       render: (p) => (p.latest_evaluation ? <Chip variant="verdict" value={p.latest_evaluation.verdict} /> : <span className="text-muted">—</span>),
     },
-    { key: 'reasons', header: 'Reasons', render: (p) => <ReasonsInline reasons={p.latest_evaluation?.reasons ?? []} /> },
+    { key: 'reasons', header: 'Reasons', width: 260, render: (p) => <ReasonsInline reasons={p.latest_evaluation?.reasons ?? []} /> },
     { key: 'warnings', header: 'Warnings', render: (p) => <WarningsBadge warnings={p.latest_evaluation?.warnings ?? []} /> },
     { key: 'match', header: 'Match', render: (p) => <MatchCell position={p} /> },
   ]
@@ -294,17 +307,20 @@ export function PositionsList() {
       {!emptyOpen && !emptyClosed && (
         <Panel>
           {status === 'open' ? (
-            <div className="flex flex-wrap items-center gap-6">
-              <Stat label="Open lots" value={sorted.length} />
-              <div className="flex flex-col gap-1">
-                <span className="text-xs text-muted">By verdict</span>
-                <div className="flex flex-wrap items-center gap-2">
-                  {VERDICT_PRECEDENCE.map((v) => (
-                    <Chip key={v} variant="verdict" value={v}>{`${v} · ${verdictCounts[v]}`}</Chip>
-                  ))}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex flex-wrap items-center gap-6">
+                <Stat label="Open lots" value={sorted.length} />
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs text-muted">By verdict</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {VERDICT_PRECEDENCE.map((v) => (
+                      <Chip key={v} variant="verdict" value={v}>{`${v} · ${verdictCounts[v]}`}</Chip>
+                    ))}
+                  </div>
                 </div>
+                <Stat label="Total unrealised ₹" value={<span className={signedClass(totalUnrealized)}>{fmtInr(totalUnrealized)}</span>} />
               </div>
-              <Stat label="Total unrealised ₹" value={<span className={signedClass(totalUnrealized)}>{fmtInr(totalUnrealized)}</span>} />
+              <p className="text-xs text-muted">Last evaluated: {lastEvaluated ? fmtIstDate(lastEvaluated) : 'never'}</p>
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-6">

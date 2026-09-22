@@ -179,13 +179,22 @@ export default function SignalsPage() {
         return <span className="num">{v === null ? '—' : v.toFixed(2)}</span>
       },
     },
-    { key: 'details', header: 'Details', sortValue: (s) => detailsSummary(s), render: (s) => detailsSummary(s) },
+    {
+      key: 'details',
+      header: 'Details',
+      width: 160,
+      sortValue: (s) => detailsSummary(s),
+      render: (s) => <span className="inline-block min-w-[160px] whitespace-nowrap">{detailsSummary(s)}</span>,
+    },
   ]
 
   const emptyReason = 'No signals match. Try widening the freshness window or clearing filters.'
 
   return (
-    <div className="flex flex-col gap-3">
+    // min-w-0 keeps this flex child from stretching to the width of its content (the
+    // signals table can get wide); without it, the table's own overflow-x-auto never
+    // engages and the whole page scrolls horizontally instead of just the table region.
+    <div className="flex min-w-0 flex-col gap-3">
       <div>
         <h1 className="text-lg font-semibold">Signals</h1>
         <p className="text-sm text-muted">Browse and shortlist setups from the scanner.</p>

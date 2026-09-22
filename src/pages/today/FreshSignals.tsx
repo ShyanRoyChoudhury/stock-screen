@@ -1,11 +1,13 @@
 // Handoff §5.1: today's 1d signals by strategy. Confluence is a state (§5.2 design
 // constraint), so it's kept separate from the event-strategy counts and table.
 //
-// /signals/fresh?days=1 is time-window based (now - 1 day), not calendar-date based, so it
-// is often empty until the evening job has produced today's bar (verified against the real
-// backend: empty at midday on 22 Sep, 72 rows for the 21 Sep session with days=2). A second,
-// tiny query (/signals?timeframe=1d&limit=1, newest first) finds the latest bar's date
-// regardless of that window, so the "stale" note can be shown without an extra loading state.
+// /signals/fresh?days=N is time-window based (now - N days), not calendar-date based, so a
+// days=1 window is often empty until the evening job has produced today's bar (verified
+// against the real backend: empty at midday on 22 Sep, 72 rows for the 21 Sep session with
+// days=2+). Fix: widen the window to days=3 so the previous session's signals are reliably
+// inside it, then find the latest IST calendar date actually present in the response and
+// render the panel for that "session" — rather than trusting the wall-clock window to line
+// up with a trading day.
 
 import { Link } from 'react-router'
 import { useFreshSignals, useSignals, useSymbols } from '../../api/hooks'
@@ -21,13 +23,13 @@ import type { Signal } from '../../api/types'
 import { todayIstKey } from './utils'
 
 const OPEN_SCANNER = (
-  <Link to="/signals?timeframe=1d&days=1" className="text-xs text-accent underline">
+  <Link to="/signals?timeframe=1d&days=3" className="text-xs text-accent underline">
     Open scanner →
   </Link>
 )
 
 export function FreshSignals() {
-  const fresh = useFreshSignals({ days: 1, timeframe: '1d' })
+  const fresh = useFreshSignals({ days: 3, timeframe: '1d' })
   const latest = useSignals({ timeframe: '1d', limit: 1 })
   const symbols = useSymbols()
 
@@ -47,12 +49,11 @@ export function FreshSignals() {
   }
 
   const signals = fresh.data ?? []
-  const todayKey = todayIstKey()
 
   if (signals.length === 0) {
     const latestSignal = latest.data?.[0]
     const latestKey = latestSignal ? istDateKey(latestSignal.ts) : null
-    const stale = latestKey !== null && latestKey < todayKey
+    const stale = latestKey !== null && latestKey < todayIstKey()
     return (
       <Panel title="Fresh signals" actions={OPEN_SCANNER}>
         {stale && latestSignal ? (
@@ -60,19 +61,25 @@ export function FreshSignals() {
             Latest bar: {fmtIstDate(latestSignal.ts)} (the daily job runs after the close)
           </p>
         ) : (
-          <EmptyState title="No fresh signals" message="Nothing fired on 1d in the last day." />
+          <EmptyState title="No fresh signals" message="Nothing fired on 1d in the last 3 days." />
         )}
       </Panel>
     )
   }
 
+  // The session this panel reports on: the latest IST calendar date actually present.
+  const dateKeys = signals.map((s) => istDateKey(s.ts)).filter((d): d is string => d !== null)
+  const sessionDate = dateKeys.length > 0 ? dateKeys.reduce((a, b) => (a > b ? a : b)) : null
+  const sessionSignals = sessionDate ? signals.filter((s) => istDateKey(s.ts) === sessionDate) : signals
+  const todayKey = todayIstKey()
+
   const nameBySymbol = new Map((symbols.data ?? []).map((s) => [s.symbol, s.name]))
-  const eventSignals = signals.filter((s) => s.strategy !== 'Confluence')
-  const confluenceCount = signals.length - eventSignals.length
-  const distinctSymbols = new Set(signals.map((s) => s.symbol)).size
+  const eventSignals = sessionSignals.filter((s) => s.strategy !== 'Confluence')
+  const confluenceCount = sessionSignals.length - eventSignals.length
+  const distinctSymbols = new Set(sessionSignals.map((s) => s.symbol)).size
 
   const byStrategy = new Map<string, number>()
-  for (const s of signals) byStrategy.set(s.strategy, (byStrategy.get(s.strategy) ?? 0) + 1)
+  for (const s of sessionSignals) byStrategy.set(s.strategy, (byStrategy.get(s.strategy) ?? 0) + 1)
 
   const top10 = eventSignals
     .filter((s): s is Signal & { risk_pct: number } => s.risk_pct !== null)
@@ -82,6 +89,15 @@ export function FreshSignals() {
   return (
     <Panel title="Fresh signals" actions={OPEN_SCANNER}>
       <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+          <h3 className="text-sm font-medium">Session of {sessionDate ? fmtIstDate(sessionDate) : '—'}</h3>
+          {sessionDate !== null && sessionDate !== todayKey && (
+            <span className="text-xs text-muted">
+              Latest bar: {fmtIstDate(sessionDate)} (the daily job runs after the close)
+            </span>
+          )}
+        </div>
+
         <div className="flex flex-wrap gap-4">
           <Stat label="Event signals" value={eventSignals.length} />
           <Stat label="Distinct symbols" value={distinctSymbols} />

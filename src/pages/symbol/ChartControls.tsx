@@ -66,7 +66,7 @@ export function ChartControls({
       </div>
 
       <div className="flex items-center gap-2">
-        <Toggle checked={showConfluenceMarkers} onChange={onShowConfluenceMarkersChange} label="Show Confluence markers" />
+        <Toggle checked={showConfluenceMarkers} onChange={onShowConfluenceMarkersChange} label="Include Confluence" />
       </div>
     </div>
   )

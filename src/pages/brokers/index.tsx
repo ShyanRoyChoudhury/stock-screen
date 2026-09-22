@@ -19,6 +19,8 @@ import { Loading } from '../../components/Loading'
 
 const BROKER_LABEL: Record<Broker, string> = { groww: 'Groww', zerodha: 'Zerodha' }
 
+const SYNC_STATUS_LABEL: Record<string, string> = { ok: 'OK', auth_failed: 'Auth failed', error: 'Error' }
+
 const BROKER_OPTIONS = [
   { value: 'groww', label: 'Groww' },
   { value: 'zerodha', label: 'Zerodha (CSV import only, no live client yet)' },
@@ -123,9 +125,11 @@ function BrokerCard({ account }: { account: BrokerAccount }) {
             <p className="text-xs text-muted">{account.active ? 'Active' : 'Inactive'}</p>
           </div>
           {account.last_sync_status ? (
-            <Chip variant="status" value={account.last_sync_status} />
+            <Chip variant="status" value={account.last_sync_status}>
+              {SYNC_STATUS_LABEL[account.last_sync_status] ?? account.last_sync_status}
+            </Chip>
           ) : (
-            <Chip variant="neutral">never</Chip>
+            <Chip variant="neutral">Never synced</Chip>
           )}
         </div>
 
