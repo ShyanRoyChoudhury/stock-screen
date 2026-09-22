@@ -166,8 +166,13 @@ def test_account(
 ):
     account = _get_owned_account(session, user, account_id)
     client = client_for(account)
-    client.authenticate()
-    holdings = client.fetch_holdings()
+    try:
+        client.authenticate()
+        holdings = client.fetch_holdings()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"broker call failed: {e}") from e
     return {"ok": True, "holdings": len(holdings)}
 
 

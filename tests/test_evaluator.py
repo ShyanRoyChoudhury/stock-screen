@@ -73,7 +73,8 @@ def test_supertrend_flip_exits():
 
 def test_trail_hit_for_unmatched_uses_trail_as_stop_level():
     # Unmatched positions have no frozen signal stop: the effective stop
-    # level IS the trail, so breaching the trail also reads as a stop hit.
+    # level IS the trail, so breaching it is reported once, as STOP_HIT —
+    # TRAIL_HIT would just be a duplicate of the same level.
     i = _inputs(
         close=85.0,
         is_unmatched=True,
@@ -88,7 +89,29 @@ def test_trail_hit_for_unmatched_uses_trail_as_stop_level():
     assert result.stop_level == 90.0
     assert result.trail_level == 90.0
     codes = [r["code"] for r in result.reasons]
-    assert "TRAIL_HIT" in codes
+    assert "STOP_HIT" in codes
+    assert "TRAIL_HIT" not in codes
+
+
+def test_trail_hit_fires_alone_when_matched_and_trail_is_a_separate_level():
+    # Matched position: frozen_stop is the effective stop, trail is a
+    # distinct (tighter) level. close is below trail but still above the
+    # frozen stop, so only TRAIL_HIT should fire.
+    i = _inputs(
+        close=85.0,
+        is_unmatched=False,
+        frozen_stop=80.0,
+        trail=90.0,
+        supertrend_dir=1,
+    )
+
+    result = decide(i)
+
+    assert result.verdict == "EXIT"
+    assert result.stop_level == 80.0
+    assert result.trail_level == 90.0
+    codes = [r["code"] for r in result.reasons]
+    assert codes == ["TRAIL_HIT"]
 
 
 def test_t1_hit_is_partial():
@@ -151,6 +174,23 @@ def test_upcoming_action_warning():
         "detail": "split ex 2026-10-01: 1:2; broker may cancel your GTT; "
                   "re-place the stop after the ex-date",
     }]
+
+
+def test_qty_differs_from_broker_suppressed_before_settlement():
+    # A BUY doesn't land in broker holdings until T+1/T+2, so a quantity
+    # mismatch before settlement_lag_sessions is noise, not a real warning.
+    not_yet_settled = decide(_inputs(
+        days_held=1, broker_qty=10, platform_qty=20, settlement_lag_sessions=2,
+    ))
+    settled = decide(_inputs(
+        days_held=2, broker_qty=10, platform_qty=20, settlement_lag_sessions=2,
+    ))
+
+    assert not_yet_settled.verdict == "HOLD"
+    assert {"code": "QTY_DIFFERS_FROM_BROKER", "detail": None} not in not_yet_settled.warnings
+
+    assert settled.verdict == "HOLD"
+    assert {"code": "QTY_DIFFERS_FROM_BROKER", "detail": None} in settled.warnings
 
 
 def test_horizon_warning_at_31_days_but_not_at_30():

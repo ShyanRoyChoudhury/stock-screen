@@ -18,11 +18,15 @@ def hash_api_key(raw: str) -> str:
 
 
 def get_current_user(
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     session: Session = Depends(get_session),
 ) -> User:
     """Resolve the caller's User from X-API-Key. Never log the raw key —
-    only its hash is compared, and the hash is not reversible."""
+    only its hash is compared, and the hash is not reversible. A missing
+    header is a 401 ("missing API key"), not FastAPI's default 422, so all
+    auth failures come back on the same status code."""
+    if x_api_key is None:
+        raise HTTPException(401, "missing API key")
     key_hash = hash_api_key(x_api_key)
     user = session.scalar(
         select(User).where(User.api_key_hash == key_hash, User.active.is_(True))

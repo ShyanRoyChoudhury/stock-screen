@@ -46,3 +46,7 @@ class BrokerClient(Protocol):
     def fetch_trades(self, day: date) -> list[TradeRecord]: ...
 
     def fetch_holdings(self) -> list[HoldingRecord]: ...
+
+
+class BrokerAuthError(Exception):
+    """Authentication/token failure; message always contains 'auth'."""

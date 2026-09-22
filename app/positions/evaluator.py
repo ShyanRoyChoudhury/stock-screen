@@ -87,6 +87,7 @@ class EvalInputs:
     stale: bool
     no_data: bool
     horizon_sessions: int = 30
+    settlement_lag_sessions: int = 2
 
 
 @dataclass
@@ -102,7 +103,18 @@ def decide(i: EvalInputs) -> EvalResult:
     """Pure rule engine. Precedence: the first rule (in listed order) whose
     condition is true sets the verdict; every rule that fires — even after
     the verdict is already set — still contributes its reason. Warnings
-    never change the verdict."""
+    never change the verdict.
+
+    TRAIL_HIT only fires when the trail is a level *separate* from the
+    effective stop: for an unmatched position the trail IS the effective
+    stop, so a breach there is already reported as STOP_HIT and TRAIL_HIT
+    would just be a duplicate of the same fact.
+
+    QTY_DIFFERS_FROM_BROKER is suppressed until `days_held >=
+    settlement_lag_sessions`: a BUY doesn't appear in broker holdings until
+    T+1/T+2, so comparing platform vs. broker quantity before settlement is
+    just noise, not a real mismatch.
+    """
     if i.no_data:
         return EvalResult(
             verdict="REVIEW",
@@ -146,7 +158,7 @@ def decide(i: EvalInputs) -> EvalResult:
         reasons.append({"code": "SUPERTREND_FLIP", "detail": None})
         verdict = verdict or "EXIT"
 
-    if i.trail is not None and i.close < i.trail:
+    if i.trail is not None and i.close < i.trail and stop_level != i.trail:
         reasons.append({"code": "TRAIL_HIT", "detail": None})
         verdict = verdict or "EXIT"
 
@@ -176,6 +188,7 @@ def decide(i: EvalInputs) -> EvalResult:
         i.broker_qty is not None
         and i.platform_qty is not None
         and i.broker_qty != i.platform_qty
+        and i.days_held >= i.settlement_lag_sessions
     ):
         warnings.append({"code": "QTY_DIFFERS_FROM_BROKER", "detail": None})
     if i.days_held > i.horizon_sessions:

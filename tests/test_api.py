@@ -7,12 +7,12 @@ _CREDENTIAL_FIELDS = ("api_key", "totp_secret", "credentials", "credentials_enc"
 
 
 def test_get_me_without_key_401(client):
-    # app/auth.py declares X-API-Key as a required Header(...), so a fully
-    # missing header is rejected by FastAPI's own validation (422) before
-    # get_current_user ever runs; an invalid key is what reaches its 401
-    # branch. Cover both, since "without a usable key" is the real intent.
+    # app/auth.py declares X-API-Key as an optional Header(default=None) so
+    # it can raise its own 401 ("missing API key") instead of FastAPI's
+    # default 422 when the header is absent entirely; an invalid key hits
+    # the other 401 branch ("invalid API key"). Cover both.
     missing = client.get("/me")
-    assert missing.status_code == 422
+    assert missing.status_code == 401
 
     invalid = client.get("/me", headers={"X-API-Key": "sk_not-a-real-key"})
     assert invalid.status_code == 401

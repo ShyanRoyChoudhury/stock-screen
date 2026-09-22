@@ -3,6 +3,13 @@ tradebook CSV import path used before a live broker client exists.
 
 `apply_unapplied_trades` (app.positions.ledger) is imported lazily wherever
 it's used: that module is being written in parallel and may not exist yet.
+
+`sync_account` commits after trades and again after holdings rather than
+once at the end: a broker's same-day trade window is precious and easy to
+miss on a retry, so trades that were already fetched must survive even if
+a later step (holdings, ledger) fails. On failure, the session is rolled
+back first (which expires `account`), so the account row is re-fetched
+before recording the failure status.
 """
 
 import csv
@@ -165,8 +172,12 @@ def sync_account(session: Session, account: BrokerAccount, day: date) -> dict:
         client.authenticate()
         trades = client.fetch_trades(day)
         trade_result = upsert_trades(session, account, trades)
+        session.commit()  # trades are precious: keep them even if holdings fail below
+
         holdings = client.fetch_holdings()
         holdings_count = upsert_holdings(session, account, day, holdings)
+        session.commit()
+
         ledger_result = _apply_unapplied_trades_lazy(session, account.user_id)
 
         account.last_sync_on = day
@@ -180,6 +191,8 @@ def sync_account(session: Session, account: BrokerAccount, day: date) -> dict:
         }
     except Exception as e:
         message = str(e)
+        session.rollback()  # first: clears any partial, uncommitted work...
+        account = session.get(BrokerAccount, account.id)  # ...which expired `account`
         account.last_sync_status = (
             "auth_failed" if re.search("auth|token", message, re.I) else "error"
         )
@@ -254,6 +267,7 @@ def import_tradebook_csv(
             raise HTTPException(422, f"row {idx}: quantity/price must be numeric")
 
         exchange = (get(row, "exchange") or "NSE").strip().upper()
+        segment = (get(row, "segment") or "CASH").strip().upper()
         product = (get(row, "product") or "CNC").strip().upper()
         time_str = (get(row, "time") or "15:29").strip()
         try:
@@ -275,7 +289,7 @@ def import_tradebook_csv(
                 broker_order_id=None,
                 exchange_trade_id=None,
                 exchange=exchange,
-                segment="EQ",
+                segment=segment,
                 product=product,
                 tradingsymbol=symbol_str,
                 isin=isin_val,
