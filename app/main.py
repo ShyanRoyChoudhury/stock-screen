@@ -1,13 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
 
-from alembic.config import Config
-from alembic.runtime.migration import MigrationContext
-from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from app.db import engine
+from app.db import assert_schema_current, engine
 from app.routers import (
     brokers,
     candles,
@@ -29,17 +26,7 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     # Schema management is Alembic's job now (see alembic/). Startup only
     # verifies the DB is at the latest migration; it never applies one.
-    alembic_cfg = Config("alembic.ini")
-    script = ScriptDirectory.from_config(alembic_cfg)
-    with engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        db_heads = set(context.get_current_heads())
-    script_heads = set(script.get_heads())
-    if db_heads != script_heads:
-        raise RuntimeError(
-            "database schema is not at the latest migration; run: "
-            ".venv/bin/alembic upgrade head"
-        )
+    assert_schema_current(engine)
     yield
 
 
