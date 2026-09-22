@@ -108,20 +108,22 @@ export function useRun(id: number | undefined, opts: { poll?: boolean } = {}) {
 // Authenticated: queries
 // ---------------------------------------------------------------------------
 
-export function useMe() {
+export function useMe(opts: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: queryKeys.me(),
     queryFn: () => api.me(),
     staleTime: MARKET_STALE_TIME,
     retry: false,
+    enabled: opts.enabled ?? true,
   })
 }
 
-export function useBrokerAccounts() {
+export function useBrokerAccounts(opts: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: queryKeys.brokerAccounts(),
     queryFn: () => api.listBrokerAccounts(),
     staleTime: RUNS_STALE_TIME,
+    enabled: opts.enabled ?? true,
   })
 }
 
@@ -133,11 +135,12 @@ export function useTrades(params: ListTradesParams = {}) {
   })
 }
 
-export function usePositions(status?: 'open' | 'closed') {
+export function usePositions(status?: 'open' | 'closed', opts: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: queryKeys.positions(status),
     queryFn: () => api.listPositions(status),
     staleTime: RUNS_STALE_TIME,
+    enabled: opts.enabled ?? true,
   })
 }
 

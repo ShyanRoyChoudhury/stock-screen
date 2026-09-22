@@ -2,12 +2,16 @@ import { createContext, createElement, useCallback, useContext, useMemo, useStat
 import type { Timeframe } from '../api/types'
 
 export type ThemePref = 'light' | 'dark' | 'system'
+export type Density = 'compact' | 'default'
+export type PositionsDefault = 'lot' | 'sym'
 
 export interface Settings {
   apiKey: string
   theme: ThemePref
   defaultTimeframe: Timeframe
   showIntraday: boolean
+  density: Density
+  positionsDefault: PositionsDefault
 }
 
 const STORAGE_KEYS = {
@@ -15,6 +19,8 @@ const STORAGE_KEYS = {
   theme: 'ss.theme',
   defaultTimeframe: 'ss.defaultTimeframe',
   showIntraday: 'ss.showIntraday',
+  density: 'ss.density',
+  positionsDefault: 'ss.positionsDefault',
 } as const
 
 const DEFAULTS: Settings = {
@@ -22,6 +28,8 @@ const DEFAULTS: Settings = {
   theme: 'system',
   defaultTimeframe: '1d',
   showIntraday: false,
+  density: 'default',
+  positionsDefault: 'lot',
 }
 
 function safeGet(key: string): string | null {
@@ -55,11 +63,15 @@ export function readSettings(): Settings {
   const theme = safeGet(STORAGE_KEYS.theme)
   const defaultTimeframe = safeGet(STORAGE_KEYS.defaultTimeframe)
   const showIntraday = safeGet(STORAGE_KEYS.showIntraday)
+  const density = safeGet(STORAGE_KEYS.density)
+  const positionsDefault = safeGet(STORAGE_KEYS.positionsDefault)
   return {
     apiKey: getApiKey(),
     theme: theme === 'light' || theme === 'dark' || theme === 'system' ? theme : DEFAULTS.theme,
     defaultTimeframe: (defaultTimeframe as Timeframe) || DEFAULTS.defaultTimeframe,
     showIntraday: showIntraday === null ? DEFAULTS.showIntraday : showIntraday === 'true',
+    density: density === 'compact' || density === 'default' ? density : DEFAULTS.density,
+    positionsDefault: positionsDefault === 'lot' || positionsDefault === 'sym' ? positionsDefault : DEFAULTS.positionsDefault,
   }
 }
 

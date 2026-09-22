@@ -6,6 +6,7 @@ import App from './App'
 import './index.css'
 import { SettingsProvider } from './lib/settings'
 import { ThemeProvider } from './lib/theme'
+import { ToastProvider } from './lib/toast'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -22,7 +23,9 @@ createRoot(document.getElementById('root')!).render(
       <BrowserRouter>
         <SettingsProvider>
           <ThemeProvider>
-            <App />
+            <ToastProvider>
+              <App />
+            </ToastProvider>
           </ThemeProvider>
         </SettingsProvider>
       </BrowserRouter>

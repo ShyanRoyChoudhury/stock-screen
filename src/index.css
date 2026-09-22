@@ -1,89 +1,52 @@
 @import "tailwindcss";
 
-@theme {
-  --color-bg: #f5f6f8;
-  --color-surface: #ffffff;
-  --color-surface-2: #eef0f3;
-  --color-border: #d9dde3;
-  --color-text: #14171c;
-  --color-muted: #5b6470;
-  --color-accent: #2563eb;
-  --color-up: #15803d;
-  --color-down: #dc2626;
-  --color-exit: #dc2626;
-  --color-partial: #d97706;
-  --color-review: #7c3aed;
-  --color-hold: #64748b;
-  --color-warn: #b45309;
+@import "./ds/tokens.css";
+@import "./ds/bundle.css";
+@import "./ds/app.css";
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+/* Map the old Tailwind token names to the design-system variables so any
+   leftover Tailwind utilities in not-yet-rewritten pages keep working. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-raised);
+  --color-border: var(--line);
+  --color-text: var(--ink);
+  --color-muted: var(--ink-muted);
+  --color-accent: var(--accent);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-exit: var(--exit);
+  --color-partial: var(--partial);
+  --color-review: var(--review);
+  --color-hold: var(--hold);
+  --color-warn: var(--partial);
+  --font-sans: var(--font-sans);
 }
 
-/* Dark theme: explicit choice via data-theme="dark" ... */
-:root[data-theme="dark"] {
-  --color-bg: #0e1116;
-  --color-surface: #161a21;
-  --color-surface-2: #1d222b;
-  --color-border: #2a3039;
-  --color-text: #e6e9ee;
-  --color-muted: #9aa3b0;
-  --color-accent: #60a5fa;
-  --color-up: #22c55e;
-  --color-down: #f87171;
-  --color-exit: #f87171;
-  --color-partial: #fbbf24;
-  --color-review: #a78bfa;
-  --color-hold: #94a3b8;
-  --color-warn: #f59e0b;
-}
-
-/* ...or system preference, when the user hasn't forced light */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --color-bg: #0e1116;
-    --color-surface: #161a21;
-    --color-surface-2: #1d222b;
-    --color-border: #2a3039;
-    --color-text: #e6e9ee;
-    --color-muted: #9aa3b0;
-    --color-accent: #60a5fa;
-    --color-up: #22c55e;
-    --color-down: #f87171;
-    --color-exit: #f87171;
-    --color-partial: #fbbf24;
-    --color-review: #a78bfa;
-    --color-hold: #94a3b8;
-    --color-warn: #f59e0b;
-  }
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html {
-  font-size: 13px;
+html, body {
+  height: 100%;
 }
 
 body {
-  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
   font-family: var(--font-sans);
-  background: var(--color-bg);
-  color: var(--color-text);
-  -webkit-font-smoothing: antialiased;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 #root {
-  min-height: 100vh;
+  min-height: 100%;
 }
 
 /* Tabular numerals for dense numeric columns */
 .num {
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum" 1;
 }
 
-/* Dense table styles shared by DataTable */
+/* Dense table styles used by the not-yet-rewritten src/components/DataTable.tsx */
 table.dense {
   width: 100%;
   border-collapse: collapse;
@@ -119,12 +82,14 @@ table.dense tbody tr:hover {
   background: var(--color-surface-2);
 }
 
-/* Focus rings */
-:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
 a {
   color: inherit;
 }
+
+/* Focus rings for not-yet-rewritten pages outside the .ss scope
+   (bundle.css covers .ss elements with the same tokens). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+

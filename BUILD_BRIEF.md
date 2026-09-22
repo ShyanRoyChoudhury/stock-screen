@@ -44,31 +44,19 @@ Settings persisted in `localStorage`: `ss.apiKey`, `ss.theme` (`light|dark|syste
 
 Mock mode: when `import.meta.env.VITE_MOCK === '1'`, `apiFetch` serves the **authenticated** routes (`/me`, `/broker-accounts*`, `/positions*`) from `src/api/mock.ts` fixtures instead of the network; market-data routes still hit the real API. Purpose: design validation of populated position/broker screens (the real DB has none yet). Fixtures: build them from handoff §10.2 and extend to ~6 positions covering every verdict (HOLD, PARTIAL, EXIT, REVIEW), one unmatched position, one closed position, two broker accounts (one `ok`, one `auth_failed`), ~8 trades (BUYs and SELLs, one unmapped with `symbol: null`), and 5 evaluation-history rows for position 1. Use real Nifty 500 symbols (CARBORUNIV, RELIANCE, BHEL, PATANJALI, USHAMART, CDSL) so symbol-detail navigation from mock positions still finds real candles.
 
-## Design tokens (`src/index.css`)
+## Design tokens — now the vendored design system
 
-Define under `@theme` so Tailwind v4 emits `bg-surface`, `text-muted`, etc., then override the variables for dark. Dark applies when `:root[data-theme="dark"]`, or when `:root:not([data-theme="light"])` and `prefers-color-scheme: dark`. `body` gets an explicit `background: var(--color-bg); color: var(--color-text)`.
+The look is governed by the vendored design system, not by this file. Read `design/design-system/README.md` (brand book and usage rules) before touching any screen, and use `src/ds/` for everything visual:
 
-```
-Light                              Dark
---color-bg:        #f5f6f8         #0e1116
---color-surface:   #ffffff         #161a21
---color-surface-2: #eef0f3         #1d222b
---color-border:    #d9dde3         #2a3039
---color-text:      #14171c         #e6e9ee
---color-muted:     #5b6470         #9aa3b0
---color-accent:    #2563eb         #60a5fa
---color-up:        #15803d         #22c55e
---color-down:      #dc2626         #f87171
---color-exit:      #dc2626         #f87171
---color-partial:   #d97706         #fbbf24
---color-review:    #7c3aed         #a78bfa
---color-hold:      #64748b         #94a3b8
---color-warn:      #b45309         #f59e0b
-```
-
-Base font size 13px; table row height 28px; cell padding 4px 8px; numeric cells right-aligned with tabular-nums; 2-decimal prices; borders 1px `border`; radius 4px; no drop shadows heavier than `0 1px 2px rgb(0 0 0 / .06)`.
+- `src/ds/tokens.css`, `src/ds/bundle.css`, `src/ds/app.css` — the design system's CSS (`ss-*` and `app-*` classes), imported by `src/index.css` ahead of a Tailwind `@theme inline` block that maps the old `--color-*` names onto the new tokens for any not-yet-rewritten page.
+- `src/ds/index.ts` — the full component port (`Icon, Button, VerdictChip, DataTable, NavRail, SessionBar, Panel, PageHead, …`), `fmt` and `labels`. Import from `'../../ds'` (or the appropriate relative path), never re-implement a control that already exists there.
+- Never hard-code a colour, radius or spacing value — use the `var(--token)` names from `design/design-system/tokens.css`.
 
 **Verdict chips always carry the text label** (never colour alone). REVIEW must look distinct from EXIT (violet vs red).
+
+## Page conventions
+
+Every page is a `<div className="ss-page">` starting with a `<PageHead title="…">`. Build the page from `src/ds` components only (`Panel`, `DataTable`, `Tabs`, `StatTile`, …) plus `fmt`/`Num` for every number and date — never a raw `.toFixed()` or `Intl` call in a page. Tailwind utility classes are for layout only (`flex`, `gap-*`, `grid-cols-*`, spacing) on top of the `app-*`/`ss-*` classes; they never set colour, font or border directly. Pages not yet ported to this convention still work (the `@theme inline` block in `src/index.css` keeps their old Tailwind colour utilities pointed at the new tokens) but should be migrated opportunistically.
 
 ## Source layout (fixed)
 

@@ -1,94 +1,147 @@
-import { useState } from 'react'
-import { Eye, EyeOff } from 'lucide-react'
+import { Fragment } from 'react'
 import { useMe } from '../../api/hooks'
-import { useSettings, type ThemePref } from '../../lib/settings'
-import { Panel } from '../../components/Panel'
-import { Button } from '../../components/Button'
-import { Select } from '../../components/Select'
-import { Toggle } from '../../components/Toggle'
-import { ApiError, type Timeframe } from '../../api/types'
-import { TIMEFRAMES } from '../../lib/domain'
+import { ApiError } from '../../api/types'
+import { Button, fmt, Field, Kbd, KV, Panel, PageHead, Tabs } from '../../ds'
+import { useSettings, type Density, type PositionsDefault, type ThemePref } from '../../lib/settings'
+
+const KEYBOARD_ROWS: [string, string][] = [
+  ['g t', 'Today'],
+  ['g s', 'Signals'],
+  ['g p', 'Positions'],
+  ['g r', 'Trades'],
+  ['g b', 'Brokers'],
+  ['g o', 'Data & Ops'],
+  ['/', 'Find symbol'],
+  ['j k / ↑↓', 'Move row cursor (click a table first)'],
+  ['↵', 'Expand / open row'],
+  ['esc', 'Close search'],
+]
 
 export default function SettingsPage() {
   const { settings, update } = useSettings()
-  const [showKey, setShowKey] = useState(false)
-  const me = useMe()
+  const hasKey = !!settings.apiKey
+  const me = useMe({ enabled: hasKey })
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold">Settings</h1>
-        <p className="text-sm text-muted">API key, theme and display preferences. Stored in this browser only.</p>
+    <div className="ss-page">
+      <PageHead title="Settings" />
+      <div className="ss-grid-2">
+        <div className="app-col">
+          <Panel title="API key">
+            <div className="app-col" style={{ gap: 12 }}>
+              <Field
+                label="API key"
+                secret
+                mono
+                value={settings.apiKey}
+                onChange={(e) => update('apiKey', e.target.value)}
+                placeholder="sk_…"
+                hint="Sent as X-API-Key. No login flow yet."
+              />
+              <div className="app-row" style={{ flexWrap: 'wrap' }}>
+                <Button onClick={() => me.refetch()} loading={me.isFetching} disabled={!hasKey}>
+                  Test
+                </Button>
+                {me.isSuccess && me.data ? (
+                  <span className="ss-up">
+                    Connected as {me.data.name}
+                    {me.data.email ? ` (${me.data.email})` : ''}.
+                  </span>
+                ) : null}
+                {me.isError ? (
+                  <span className="ss-down">{me.error instanceof ApiError ? `${me.error.status} · ${me.error.message}` : 'Could not reach the API.'}</span>
+                ) : null}
+              </div>
+            </div>
+          </Panel>
+          <Panel title="Account">
+            {!hasKey ? (
+              <p className="ss-muted">Set an API key above to see your account.</p>
+            ) : me.data ? (
+              <KV
+                items={[
+                  ['Name', me.data.name],
+                  ['Email', me.data.email ?? '—'],
+                  ['Created', fmt.date(me.data.created_at)],
+                ]}
+              />
+            ) : me.isError ? (
+              <p className="ss-down">Could not load your account. Check the key above.</p>
+            ) : (
+              <p className="ss-muted">Loading…</p>
+            )}
+          </Panel>
+        </div>
+        <div className="app-col">
+          <Panel title="Display">
+            <div className="app-col" style={{ gap: 14 }}>
+              <div className="app-setting">
+                <span>Theme</span>
+                <Tabs
+                  variant="segmented"
+                  ariaLabel="Theme"
+                  value={settings.theme}
+                  onChange={(v) => update('theme', v as ThemePref)}
+                  items={[
+                    { id: 'system', label: 'System' },
+                    { id: 'dark', label: 'Dark' },
+                    { id: 'light', label: 'Light' },
+                  ]}
+                />
+              </div>
+              <div className="app-setting">
+                <span>Table density</span>
+                <Tabs
+                  variant="segmented"
+                  ariaLabel="Density"
+                  value={settings.density}
+                  onChange={(v) => update('density', v as Density)}
+                  items={[
+                    { id: 'compact', label: 'Compact' },
+                    { id: 'default', label: 'Default' },
+                  ]}
+                />
+              </div>
+              <div className="app-setting">
+                <span>Show 1h / 4h (experimental)</span>
+                <Tabs
+                  variant="segmented"
+                  ariaLabel="Show intraday"
+                  value={settings.showIntraday ? 'on' : 'off'}
+                  onChange={(v) => update('showIntraday', v === 'on')}
+                  items={[
+                    { id: 'off', label: 'Hidden' },
+                    { id: 'on', label: 'Shown' },
+                  ]}
+                />
+              </div>
+              <div className="app-setting">
+                <span>Positions open on</span>
+                <Tabs
+                  variant="segmented"
+                  ariaLabel="Positions default"
+                  value={settings.positionsDefault}
+                  onChange={(v) => update('positionsDefault', v as PositionsDefault)}
+                  items={[
+                    { id: 'lot', label: 'Per lot' },
+                    { id: 'sym', label: 'By symbol' },
+                  ]}
+                />
+              </div>
+            </div>
+          </Panel>
+          <Panel title="Keyboard">
+            <div className="app-kbd-grid">
+              {KEYBOARD_ROWS.map(([k, v]) => (
+                <Fragment key={k}>
+                  <Kbd keys={k.split(' / ')[0]} />
+                  <span className="ss-muted">{v}</span>
+                </Fragment>
+              ))}
+            </div>
+          </Panel>
+        </div>
       </div>
-
-      <Panel title="API key" className="max-w-xl">
-        <div className="flex flex-col gap-2">
-          <label className="text-xs text-muted" htmlFor="api-key">
-            X-API-Key sent with every authenticated request (positions, trades, brokers). There is no login flow yet.
-          </label>
-          <div className="flex items-center gap-2">
-            <input
-              id="api-key"
-              type={showKey ? 'text' : 'password'}
-              value={settings.apiKey}
-              onChange={(e) => update('apiKey', e.target.value)}
-              placeholder="sk_…"
-              autoComplete="off"
-              spellCheck={false}
-              className="num flex-1 rounded border border-border bg-surface px-2 py-1 text-sm"
-            />
-            <button
-              type="button"
-              onClick={() => setShowKey((s) => !s)}
-              className="flex items-center justify-center rounded border border-border p-1.5 text-muted hover:text-text"
-              aria-label={showKey ? 'Hide API key' : 'Show API key'}
-            >
-              {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
-            </button>
-            <Button type="button" onClick={() => me.refetch()} disabled={me.isFetching}>
-              {me.isFetching ? 'Testing…' : 'Test'}
-            </Button>
-          </div>
-
-          {me.isSuccess && me.data && (
-            <p className="text-xs text-up">Connected as {me.data.name}{me.data.email ? ` (${me.data.email})` : ''}.</p>
-          )}
-          {me.isError && (
-            <p className="text-xs text-exit">{me.error instanceof ApiError ? me.error.message : 'Could not reach the API.'}</p>
-          )}
-        </div>
-      </Panel>
-
-      <Panel title="Display" className="max-w-xl">
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <span className="text-sm">Theme</span>
-            <Select
-              value={settings.theme}
-              onChange={(v) => update('theme', v as ThemePref)}
-              options={[
-                { value: 'light', label: 'Light' },
-                { value: 'dark', label: 'Dark' },
-                { value: 'system', label: 'System' },
-              ]}
-            />
-          </div>
-
-          <div className="flex items-center justify-between">
-            <span className="text-sm">Default timeframe</span>
-            <Select
-              value={settings.defaultTimeframe}
-              onChange={(v) => update('defaultTimeframe', v as Timeframe)}
-              options={TIMEFRAMES.map((tf) => ({ value: tf.key, label: tf.trusted ? tf.label : `${tf.label} (experimental)` }))}
-            />
-          </div>
-
-          <div className="flex items-center justify-between">
-            <span className="text-sm">Show 1h / 4h everywhere</span>
-            <Toggle checked={settings.showIntraday} onChange={(v) => update('showIntraday', v)} />
-          </div>
-        </div>
-      </Panel>
     </div>
   )
 }
