@@ -86,12 +86,26 @@ def adjustment_series(
     return out
 
 
-def volume_factor_series(volumes: pd.Series, actions: pd.DataFrame) -> pd.Series:
-    """Share-count factor per bar. Splits and bonuses multiply the share
-    count, so pre-event volume must be scaled to compare with post-event
-    volume — otherwise a 20-bar RVOL window spanning a 2:1 split reads a
-    phantom 2x surge. Dividends do not change share count.
+def volume_factor_series(
+    volumes: pd.Series, actions: pd.DataFrame, source_basis: str
+) -> pd.Series:
+    """Share-count factor per bar, for RAW volume only.
+
+    Splits and bonuses multiply the share count, so raw pre-event volume must
+    be scaled to compare with post-event volume — otherwise a 20-bar RVOL
+    window spanning a 2:1 split reads a phantom 2x surge. Dividends do not
+    change share count.
+
+    Only 'unadjusted' volume (NSE bhavcopy) needs this. yfinance volume is
+    already split- and bonus-adjusted, like its price: RELIANCE's volume shows
+    no 2x step across its 2024-10-28 1:1 bonus (median 17.9M before, 13.6M
+    after). Applying this to splits_only volume would double-adjust it, so
+    that case returns 1.0.
     """
+    if source_basis == "splits_only":
+        return pd.Series(1.0, index=volumes.index)
+    if source_basis != "unadjusted":
+        raise ValueError(f"unsupported source_basis {source_basis!r}")
     if actions.empty or volumes.empty:
         return pd.Series(1.0, index=volumes.index)
     ev = actions[(actions["action_type"].isin(("split", "bonus")))
