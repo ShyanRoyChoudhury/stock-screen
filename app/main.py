@@ -6,12 +6,15 @@ from sqlalchemy import text
 
 from app.db import Base, engine
 from app.routers import (
+    brokers,
     candles,
     corporate_actions,
     indicators,
     ingest,
+    positions,
     signals,
     symbols,
+    users,
 )
 
 logging.basicConfig(
@@ -33,6 +36,9 @@ app.include_router(candles.router)
 app.include_router(indicators.router)
 app.include_router(signals.router)
 app.include_router(corporate_actions.router)
+app.include_router(users.router)
+app.include_router(brokers.router)
+app.include_router(positions.router)
 
 
 @app.get("/health")
