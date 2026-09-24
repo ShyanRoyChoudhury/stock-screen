@@ -1,21 +1,72 @@
+# Local stack: Postgres + the backend. The daily job runs from the same image
+# under the `jobs` profile, so it never starts on `docker compose up`.
+#
+# This file is for running the whole thing on one machine. Hosting does not
+# use it: there the image runs on its own against an external Postgres, with
+# DATABASE_URL and the rest set as plain environment variables — see
+# docs/RUNBOOK.md §9.
+#
+#   docker compose up -d --build     # db + api, API on localhost:8000
+#   docker compose run --rm sync     # one scripts/daily_sync.py run
+#   docker compose logs -f api
+#
+# Config comes from the repo-root .env (see .env.example), except
+# DATABASE_URL: that one points at the host's 5433 for venv work, while
+# in-network the DB is db:5432 — so `environment:` below overrides it
+# (Compose gives `environment` precedence over `env_file`). DOCKER_DATABASE_URL
+# in .env overrides it again, to point these containers at some other DB.
+
+x-backend: &backend
+  build: .
+  image: stockscreen-backend:latest
+  env_file:
+    - path: .env
+      required: false
+  depends_on:
+    db:
+      condition: service_healthy
+
 services:
   db:
     image: postgres:16
     container_name: stockscreen-db
     environment:
-      POSTGRES_USER: stockscreen
-      POSTGRES_PASSWORD: stockscreen
-      POSTGRES_DB: stockscreen
+      POSTGRES_USER: ${POSTGRES_USER:-stockscreen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stockscreen}
+      POSTGRES_DB: ${POSTGRES_DB:-stockscreen}
     ports:
       # 5433 on the host: 5432 is taken by another local project's Postgres.
       - "5433:5432"
     volumes:
       - stockscreen_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U stockscreen -d stockscreen"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stockscreen} -d ${POSTGRES_DB:-stockscreen}"]
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  api:
+    <<: *backend
+    container_name: stockscreen-api
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-stockscreen}:${POSTGRES_PASSWORD:-stockscreen}@db:5432/${POSTGRES_DB:-stockscreen}}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    restart: unless-stopped
+
+  # Not started by `up` (profile). Invoke per trading day from the host's
+  # cron/launchd: `docker compose run --rm sync`, optionally with flags —
+  # `docker compose run --rm sync python scripts/daily_sync.py --steps reap`.
+  sync:
+    <<: *backend
+    profiles: ["jobs"]
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-stockscreen}:${POSTGRES_PASSWORD:-stockscreen}@db:5432/${POSTGRES_DB:-stockscreen}}
+      # The API container owns migrations; the job only asserts the schema.
+      RUN_MIGRATIONS: "0"
+    command: ["python", "scripts/daily_sync.py"]
+    restart: "no"
 
 volumes:
   stockscreen_pgdata:

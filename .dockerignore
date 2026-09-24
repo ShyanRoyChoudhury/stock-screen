@@ -1,0 +1,25 @@
+# The image carries the service and its jobs — nothing else.
+.git
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.DS_Store
+
+# Secrets stay out of the layer cache; config comes in as env vars at run
+# time (pydantic-settings reads the real environment, not just .env).
+.env
+
+# Front end: built and served separately (see README "Web UI").
+ui
+
+# Source notebooks the service was extracted from; not runtime code.
+*.ipynb
+.ipynb_checkpoints
+
+# Docs, tests, host-only scheduling templates.
+docs
+tests
+logs
+scripts/launchd

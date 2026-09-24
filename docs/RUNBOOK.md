@@ -56,11 +56,15 @@ so the new value is read.
 ### Postgres (Docker)
 
 ```bash
-docker compose up -d              # postgres:16 as container `stockscreen-db`, localhost:5433
+docker compose up -d db           # postgres:16 as container `stockscreen-db`, localhost:5433
 docker exec stockscreen-db pg_isready -U stockscreen -d stockscreen   # readiness check
 docker compose stop                # stop; volume `stockscreen_pgdata` (data) is untouched
 docker compose logs -f db          # or: docker logs -f stockscreen-db
 ```
+
+`docker compose up -d` with no service name now starts the **API container
+too** (§9). Name `db` explicitly when you want only Postgres and intend to
+run uvicorn from the venv, or the two will both serve the same database.
 
 ### uvicorn
 
@@ -92,7 +96,9 @@ RuntimeError: database schema is not at the latest migration; run:
 
 uvicorn will fail to start (crash with that traceback) until you run
 `.venv/bin/alembic upgrade head`. The app **never** auto-applies a
-migration — schema changes are Alembic's job only (see §3).
+migration — schema changes are Alembic's job only (see §3). The container
+image runs `alembic upgrade head` in its entrypoint, *before* uvicorn, so a
+deploy migrates itself; that is the entrypoint's doing, not the app's (§9).
 
 ---
 
@@ -799,6 +805,238 @@ to the full active universe).
 | `scripts/validate.py` Layer-1 `FAIL` on the 4h-vs-1h check, only during market hours | The current 4h bin's 1h candles exist but its own 4h row is withheld until the bin closes (13:15/15:30 IST) — see §4 | Re-run after 15:30 IST, or disregard a `FAIL` confined to today |
 | 1h/4h signals look unreliable / RVOL looks wrong | Documented in `docs/UI_HANDOFF.md`: ~13% of Yahoo hourly bars have zero volume, distorting every volume-gated strategy on 1h/4h | Treat 1h/4h as experimental; use `timeframe=1d` for real decisions |
 | `docker exec stockscreen-db ...` / `docker compose up -d` fails to connect | Docker daemon/Desktop isn't running | Start Docker Desktop, then `docker compose up -d` |
+| `stockscreen-api` exits 1 with `entrypoint: database unreachable after N attempts` | Wrong `DATABASE_URL` for the container (e.g. `localhost:5433`, which inside the container is the container itself), or the DB is genuinely down | `docker compose config \| grep DATABASE_URL` — in-network it must be `db:5432`; §9 |
+| `stockscreen-api` restarts in a loop right after a deploy | Two replicas raced `alembic upgrade head`; the loser fails the startup schema check | `RUN_MIGRATIONS=0` on the replicas, migrate once as a release step (§9) |
+| Port 8000 already in use on `docker compose up` | A venv uvicorn is still running on the host | `kill $(pgrep -f "uvicorn app.main:app")`, or set `API_PORT` in `.env` |
+
+---
+
+## 9. Deployment (Docker)
+
+The backend ships as one image (`Dockerfile`) that serves the API *and* runs
+the `scripts/` jobs — the daily job is this app's own code path, so it needs
+the same dependencies and the same schema check, just a different command.
+
+Two separate things, deliberately: **`docker-compose.yml` is the local
+stack** (Postgres + API on this machine). **Hosting runs the image
+directly** — `docker run`, or a platform that takes an image — against a
+Postgres that lives somewhere else and is not managed from this repo.
+
+### Layout
+
+| File | Role |
+|---|---|
+| `Dockerfile` | Two-stage build: deps into `/opt/venv` (with a compiler available), then a `python:3.12-slim` runtime with no compiler. Runs as uid 10001, CWD `/srv/stock-screen`, `TZ=Asia/Kolkata` |
+| `docker/entrypoint.sh` | Maps `$PORT`→`UVICORN_PORT`, waits for Postgres, runs `alembic upgrade head`, then `exec`s the command |
+| `.dockerignore` | Keeps `.venv`, `.git`, `.env`, `ui/`, notebooks, tests and docs out of the image |
+| `docker-compose.yml` | **Local only:** `db` + `api`, plus `sync` (the daily job) under the `jobs` profile |
+
+### Local stack (compose)
+
+```bash
+docker compose up -d --build         # db + api; api waits for db's healthcheck
+docker compose ps                    # both should read "(healthy)"
+docker compose logs -f api
+curl -sf localhost:8000/health       # {"status":"ok","database":"ok"}
+docker compose down                  # stop; the pgdata volume is untouched
+```
+
+Compose feeds the containers the repo-root `.env` (`env_file`, optional) and
+then overrides `DATABASE_URL`, because the value in `.env` is the **host's**
+view (`localhost:5433`, for venv `alembic`/`pytest`/`scripts`) while
+in-network the DB is `db:5432`.
+
+### Hosting: run the image against an external Postgres
+
+There is no `.env` in the image, by design (`.dockerignore`): every setting
+arrives as a **real environment variable**, which is what a platform's
+"environment"/"secrets" panel sets. `app/config.py` reads them directly
+(pydantic-settings), so the names are the same as §1's.
+
+```bash
+docker build -t stockscreen-backend:$(git rev-parse --short HEAD) .
+docker tag  stockscreen-backend:$(git rev-parse --short HEAD) registry.example.com/stockscreen-backend:latest
+docker push registry.example.com/stockscreen-backend:latest
+
+docker run -d --name stockscreen-api -p 8000:8000 \
+  -e DATABASE_URL='postgresql+psycopg://user:pass@db.example.com:5432/stockscreen?sslmode=require' \
+  -e BROKER_MASTER_KEY='...' \
+  --restart unless-stopped \
+  registry.example.com/stockscreen-backend:latest
+```
+
+**Where the value actually goes.** `DATABASE_URL` is a *runtime* variable —
+never a build arg, never baked into the image, so the same image runs
+against staging and production:
+
+| How you run it | Where the URL goes |
+|---|---|
+| `docker run` | `-e DATABASE_URL='...'` (single-quoted; `?`, `&` and `$` are shell metacharacters) |
+| `docker run`, many vars | `--env-file /etc/stockscreen.env` on the **host** — one `KEY=VALUE` per line. Docker does **not** strip quotes here: `DATABASE_URL="postgres..."` keeps the quotes as part of the value and fails to connect. Write it bare |
+| systemd unit | `Environment=` / `EnvironmentFile=` on the `docker run` service |
+| Render / Railway / Fly / Heroku | The environment or secrets panel (`fly secrets set DATABASE_URL=...`); many of them offer to inject their own managed-DB URL, which still needs its scheme rewritten to `postgresql+psycopg://` |
+| ECS / Cloud Run | Task definition `secrets` from Secrets Manager / SSM, or Secret Manager env refs |
+| Kubernetes | A `Secret` plus `envFrom.secretRef` on the pod spec |
+
+That is the whole configuration surface for a single instance:
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `DATABASE_URL` | **yes** | the local compose URL, which is wrong anywhere else | Must keep the `postgresql+psycopg://` scheme (SQLAlchemy 2 + psycopg 3) |
+| `BROKER_MASTER_KEY` | for broker features | unset | Fernet key (§1). Platform secret store, never the image |
+| `PORT` | no | unset | Copied to `UVICORN_PORT` by the entrypoint — what Render/Railway/Fly/Cloud Run inject. `CMD` passes no `--port` on purpose: an explicit flag would win over the environment |
+| `UVICORN_HOST` / `UVICORN_PORT` | no | `0.0.0.0` / `8000` | Read by uvicorn's own CLI (click, `auto_envvar_prefix="UVICORN"`) |
+| `RUN_MIGRATIONS` | no | `1` | `0` skips `alembic upgrade head` on boot |
+| `WAIT_FOR_DB` | no | `1` | `0` skips the startup readiness wait |
+| `DB_WAIT_SECONDS` | no | `60` | How long to wait for the DB before exiting 1 |
+| `TZ` | no | `Asia/Kolkata` | A few paths date off the local clock (e.g. the default corporate-actions window); "today" here always means the Indian trading day |
+
+Everything else in §1's table (`HOURLY_BACKFILL_DAYS`, `FETCH_DELAY_SECONDS`,
+`CHANDELIER_ATR_MULTIPLE`, ...) is optional and keeps its `app/config.py`
+default unless set.
+
+**Writing `DATABASE_URL`:**
+
+| Where the DB runs | Host in the URL |
+|---|---|
+| Managed (RDS/Neon/Supabase/...) | The provider's hostname, usually with `?sslmode=require` |
+| Another machine / VM | Its hostname or IP, reachable from the container |
+| **Its own container on this host** | The DB **container's name**, on a shared user-defined network, with its *internal* port: `@stockscreen-db:5432`. See below |
+| **The same machine, outside Docker** | `host.docker.internal` — **not** `localhost`, which inside a container is the container itself. Docker Desktop resolves it; on Linux add `--add-host=host.docker.internal:host-gateway` |
+
+When Postgres is its own container, the two containers must share a
+**user-defined** network — Docker's DNS resolves container names only there,
+not on the default bridge:
+
+```bash
+docker network create stockscreen-net                       # once
+docker network connect stockscreen-net stockscreen-db       # if the DB is already running
+
+docker run -d --name stockscreen-api --network stockscreen-net -p 8000:8000 \
+  -e DATABASE_URL='postgresql+psycopg://stockscreen:stockscreen@stockscreen-db:5432/stockscreen' \
+  stockscreen-backend
+```
+
+Two details that catch people out:
+
+- Use the DB's **internal** port (5432), not the host-published one (5433).
+  Publishing is irrelevant between containers on the same network; the API
+  container talks to the DB directly.
+- Without the shared network the entrypoint exits with
+  `failed to resolve host 'stockscreen-db'`. Either connect the networks as
+  above, or fall back to the published port via `host.docker.internal:5433`.
+
+- A provider-supplied `postgres://` / `postgresql://` URL needs its scheme
+  rewritten to `postgresql+psycopg://`; nothing else about it changes.
+- Percent-encode a password containing `@ : / ? # [ ] %`.
+- libpq parameters (`sslmode`, `connect_timeout`, `options`) go in the query
+  string and are passed through to psycopg.
+
+Verify the wiring the moment the container is up — `/health` opens a real DB
+connection, so a green `/health` means the URL, credentials, network path
+and schema version are all good:
+
+```bash
+curl -sf https://your-host/health     # {"status":"ok","database":"ok"}
+docker logs stockscreen-api           # entrypoint's migration output, then uvicorn's bind line
+```
+
+A bad `DATABASE_URL` fails fast and loudly instead of serving errors: the
+entrypoint exits 1 with `entrypoint: database unreachable after N attempts`
+and the reason from psycopg.
+
+### The daily job and the scripts, in a container
+
+Same image, different command — every `scripts/*.py` runs this way.
+
+Hosted (the `--rm` container exits when the pipeline is done; give it the
+same env as the API, and `RUN_MIGRATIONS=0` so it never migrates behind the
+running service):
+
+```bash
+docker run --rm \
+  -e DATABASE_URL="$DATABASE_URL" -e BROKER_MASTER_KEY="$BROKER_MASTER_KEY" \
+  -e RUN_MIGRATIONS=0 \
+  registry.example.com/stockscreen-backend:latest \
+  python scripts/daily_sync.py --json
+
+docker run --rm -e DATABASE_URL="$DATABASE_URL" -e RUN_MIGRATIONS=0 \
+  registry.example.com/stockscreen-backend:latest \
+  python scripts/create_user.py --name shyan
+```
+
+On a platform, the same thing is a scheduled/cron job on the image (Render
+Cron Job, Fly machine `schedule`, ECS scheduled task, k8s CronJob) with
+command `python scripts/daily_sync.py`, at 16:15 IST on weekdays — mind the
+scheduler's own time zone, which is usually UTC (10:45 UTC).
+
+Locally, the same job is the compose `sync` service (in the `jobs` profile,
+so `docker compose up` never starts it):
+
+```bash
+docker compose run --rm sync                                    # full pipeline
+docker compose run --rm sync python scripts/daily_sync.py --json
+docker compose run --rm sync python scripts/daily_sync.py \
+  --steps ingest,indicators,signals --symbols RELIANCE,TCS --timeframes 1d
+```
+
+Either way the job refuses to do anything if the schema is behind
+(`assert_schema_current`), so a job container that outlives a rollback fails
+loudly rather than writing against the wrong schema. Host cron entry in
+README's "Scheduling"; the flags are in §4.
+
+### Migrations on deploy
+
+The entrypoint runs `alembic upgrade head` before uvicorn starts, so
+deploying a new image migrates the DB by itself — nothing to remember, and
+the service cannot come up against a schema it does not match.
+
+Two cases where you take that over instead:
+
+- **More than one API instance.** Set `RUN_MIGRATIONS=0` on all of them and
+  migrate once as a release step, or they race on the same
+  `alembic_version` row and the losers crash on the startup schema check:
+
+  ```bash
+  docker run --rm -e DATABASE_URL="$DATABASE_URL" -e RUN_MIGRATIONS=0 \
+    registry.example.com/stockscreen-backend:latest alembic upgrade head
+  ```
+
+  (`RUN_MIGRATIONS=0` so the entrypoint doesn't also migrate; the explicit
+  `alembic upgrade head` command is the one that does the work.)
+
+- **A migration you want to watch.** Same command, run by hand before
+  rolling the image out.
+
+Downgrades are not automatic and never run on boot: `alembic downgrade -1`
+in the same one-off container, before deploying the older image.
+
+### Notes before hosting this on the open internet
+
+- **CORS.** The service has no CORS middleware, so a UI served from another
+  origin cannot call it. Either serve `ui/dist` from this origin (a reverse
+  proxy in front of both), or add `CORSMiddleware` to `app/main.py`.
+- **Auth coverage.** Only `/me`, `/broker-accounts` and `/positions` require
+  `X-API-Key` (§5, §6). Ingest, indicators, signals and candles are open —
+  including the POST endpoints that start a full universe backfill. Put the
+  service behind a network boundary (VPN/private network/proxy auth) unless
+  and until those are authenticated.
+- **`BROKER_MASTER_KEY` is the whole security of stored broker credentials.**
+  It belongs in the platform's secret store, never in the image or a
+  committed `.env`. Rotating it invalidates every stored credential.
+- **Dependency pinning.** `requirements.txt` uses `>=`, so two builds of the
+  same commit can resolve different versions. Pin (or add a lockfile) before
+  this matters — yfinance in particular moves fast.
+- **Outbound network.** The container needs egress to Yahoo Finance
+  (yfinance), `archives.nseindia.com` (the Nifty 500 list),
+  `www.nseindia.com` (corporate actions) and Groww's API. NSE blocks
+  non-browser clients often; the universe fetch has a static fallback
+  (`app/universe.py`), corporate actions do not.
+- **One uvicorn worker.** `POST /ingest/run` and friends do the work in a
+  FastAPI `BackgroundTask` inside the serving process, so a request-scoped
+  restart mid-run leaves an `IngestRun` stuck `running` (reap it, §4). Scale
+  with replicas only after checking that the 409 in-progress guard —
+  which is DB-level — is doing what you want across them.
 
 ---
 

@@ -8,14 +8,26 @@ calculation/signal layer comes next and will read candles from this DB.
 
 ## Run
 
+Everything in Docker — Postgres 16 plus the service, which migrates the DB
+to Alembic's head on boot:
+
 ```bash
-docker compose up -d            # Postgres 16 on localhost:5433
+cp .env.example .env            # optional; compose runs without it
+docker compose up -d --build    # API on localhost:8000, Postgres on 5433
+curl -sf localhost:8000/health  # {"status":"ok","database":"ok"}
+```
+
+Or the DB in Docker and the service from the venv, for development:
+
+```bash
+docker compose up -d db         # Postgres 16 on localhost:5433
 .venv/bin/pip install -r requirements.txt
 .venv/bin/alembic upgrade head
 .venv/bin/uvicorn app.main:app --port 8000
 ```
 
-For day-to-day operation (env, backups, scripts, every endpoint, troubleshooting), see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+For day-to-day operation (env, backups, scripts, every endpoint, troubleshooting), see [`docs/RUNBOOK.md`](docs/RUNBOOK.md); for deploying the
+container elsewhere, [§9 Deployment](docs/RUNBOOK.md#9-deployment-docker).
 
 ## Typical flow
 
@@ -114,6 +126,16 @@ Cron (crontab entry, any Linux box or a Mac kept awake/on IST):
 15 16 * * 1-5 cd /path/to/stock-screen && .venv/bin/python scripts/daily_sync.py >> logs/daily_sync.log 2>&1
 ```
 
+Containerized, the same job runs from the API image under compose's `jobs`
+profile (so it never starts with `docker compose up`):
+
+```
+15 16 * * 1-5 cd /path/to/stock-screen && docker compose run --rm sync >> logs/daily_sync.log 2>&1
+```
+
+The container's clock is IST (`TZ=Asia/Kolkata` in the Dockerfile), but cron
+still fires on the **host's** time zone — the entry above assumes an IST host.
+
 macOS launchd alternative: `scripts/launchd/com.stockscreen.daily-sync.plist`
 is a template (see the comment at its top for install steps — substitute
 your repo path with `sed`, copy to `~/Library/LaunchAgents/`, then
@@ -162,7 +184,9 @@ a change:
 4. `.venv/bin/alembic upgrade head`
 
 The app checks at startup that the DB is on the latest migration and
-refuses to start otherwise (see `app/main.py`). An existing pre-Alembic
+refuses to start otherwise (see `app/main.py`); the container closes that
+gap by running `alembic upgrade head` in its entrypoint before uvicorn
+(`docker/entrypoint.sh`, opt out with `RUN_MIGRATIONS=0`). An existing pre-Alembic
 database — one whose tables were created by the old `create_all()` path —
 is adopted by stamping it at the baseline revision instead of replaying
 migrations against it: `.venv/bin/alembic stamp head`.
