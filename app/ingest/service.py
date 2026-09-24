@@ -19,7 +19,7 @@ from app.db import SessionLocal
 from app.ingest.fetcher import fetch_ohlcv
 from app.ingest.resample import resample_1h_to_4h
 from app.market_calendar import IST, is_trading_day, now_ist
-from app.models import Candle, IngestRun, Symbol
+from app.models import PRICE_BASIS_DEFAULT, Candle, IngestRun, Symbol
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +28,21 @@ SESSION_OPEN_OFFSET = timedelta(hours=9, minutes=15)
 
 
 def upsert_candles(
-    session: Session, symbol_id: int, timeframe: str, df: pd.DataFrame
+    session: Session,
+    symbol_id: int,
+    timeframe: str,
+    df: pd.DataFrame,
+    source: str = "yfinance",
+    price_basis: str = PRICE_BASIS_DEFAULT,
 ) -> int:
+    """Upsert candles for one (symbol, timeframe).
+
+    `source` and `price_basis` are stored per row so a series can be audited:
+    prices from different providers, or on different adjustment conventions,
+    are not interchangeable (see fetch_ohlcv). Both are in the ON CONFLICT set,
+    so a re-ingest on a new basis restamps the rows it rewrites — leaving any
+    rows it did NOT reach still showing the old basis, which is exactly the
+    signal that a partial re-ingest happened."""
     if df.empty:
         return 0
     rows = [
@@ -42,7 +55,8 @@ def upsert_candles(
             "low": float(r.low),
             "close": float(r.close),
             "volume": int(r.volume) if pd.notna(r.volume) else 0,
-            "source": "yfinance",
+            "source": source,
+            "price_basis": price_basis,
         }
         for ts, r in df.iterrows()
     ]
@@ -53,7 +67,8 @@ def upsert_candles(
             constraint="uq_candle",
             set_={
                 c: stmt.excluded[c]
-                for c in ("open", "high", "low", "close", "volume", "source")
+                for c in ("open", "high", "low", "close", "volume",
+                          "source", "price_basis")
             },
         )
         session.execute(stmt)

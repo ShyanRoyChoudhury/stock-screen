@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job template for scripts/daily_sync.py.
+
+  {REPO} below is a literal placeholder -- it is NOT resolved by launchd.
+  To install:
+
+    1. Substitute your actual repo path in place of {REPO}:
+         sed 's|{REPO}|/absolute/path/to/stock-screen|g' \
+           scripts/launchd/com.stockscreen.daily-sync.plist \
+           > ~/Library/LaunchAgents/com.stockscreen.daily-sync.plist
+
+    2. Make sure the logs directory exists (launchd will not create it):
+         mkdir -p /absolute/path/to/stock-screen/logs
+
+    3. Load the job:
+         launchctl load ~/Library/LaunchAgents/com.stockscreen.daily-sync.plist
+
+       To unload / reinstall after edits:
+         launchctl unload ~/Library/LaunchAgents/com.stockscreen.daily-sync.plist
+         launchctl load ~/Library/LaunchAgents/com.stockscreen.daily-sync.plist
+
+    4. To run it once immediately (without waiting for the schedule), e.g.
+       to verify the install:
+         launchctl start com.stockscreen.daily-sync
+
+  Schedule: launchd's StartCalendarInterval fires by the MACHINE's local
+  time zone, not IST. Weekday 1-5 (Mon-Fri) at 16:15 is meant to land
+  shortly after NSE's 15:30 IST close -- that is only correct if the Mac
+  running this job is itself set to IST (Asia/Kolkata). If it's on a
+  different time zone, adjust Hour/Minute below to whatever the machine's
+  local clock reads at 15:45-16:15 IST, or run daily_sync.py from a cron/
+  launchd job on a machine that IS on IST (e.g. a small always-on box or a
+  cloud VM) instead.
+
+  WorkingDirectory is set to {REPO} because app/config.py's pydantic-
+  settings Settings() reads .env relative to the process's current working
+  directory, not the script's location.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.stockscreen.daily-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{REPO}/.venv/bin/python</string>
+        <string>scripts/daily_sync.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{REPO}</string>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>1</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>15</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>2</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>15</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>3</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>15</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>4</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>15</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>5</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>15</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>{REPO}/logs/daily-sync.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{REPO}/logs/daily-sync.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

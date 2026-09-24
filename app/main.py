@@ -4,8 +4,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from app.db import Base, engine
-from app.routers import candles, indicators, ingest, signals, symbols
+from app.db import assert_schema_current, engine
+from app.routers import (
+    brokers,
+    candles,
+    corporate_actions,
+    indicators,
+    ingest,
+    positions,
+    signals,
+    symbols,
+    users,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -14,8 +24,9 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # v1 schema management; switch to Alembic once the schema starts evolving.
-    Base.metadata.create_all(engine)
+    # Schema management is Alembic's job now (see alembic/). Startup only
+    # verifies the DB is at the latest migration; it never applies one.
+    assert_schema_current(engine)
     yield
 
 
@@ -25,6 +36,10 @@ app.include_router(ingest.router)
 app.include_router(candles.router)
 app.include_router(indicators.router)
 app.include_router(signals.router)
+app.include_router(corporate_actions.router)
+app.include_router(users.router)
+app.include_router(brokers.router)
+app.include_router(positions.router)
 
 
 @app.get("/health")

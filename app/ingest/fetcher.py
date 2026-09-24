@@ -19,9 +19,18 @@ def fetch_ohlcv(
 ) -> pd.DataFrame:
     """Fetch OHLCV for an NSE symbol. Returns a tz-aware (IST) indexed frame
     with columns open/high/low/close/volume; empty frame if Yahoo has nothing.
+
+    Prices are split-adjusted but NOT dividend-adjusted (auto_adjust=False).
+    auto_adjust=True would return a total-return series whose historical values
+    Yahoo re-scales on every ex-dividend date: a stored bar that is never
+    re-fetched keeps its write-time basis, so the table develops a step at each
+    ex-date. Unadjusted prices are immutable facts and match the levels traders
+    actually see, which is what the entry/stop/target layer needs. Dividends
+    belong in a corporate-actions table and are applied at read time.
     """
     ticker = f"{symbol}.NS"
-    kwargs: dict = {"interval": interval, "progress": False, "auto_adjust": True}
+    # auto_adjust=False adds an "Adj Close" column, dropped by the select below.
+    kwargs: dict = {"interval": interval, "progress": False, "auto_adjust": False}
     if start is not None:
         kwargs["start"] = start
     else:
@@ -29,7 +38,14 @@ def fetch_ohlcv(
 
     data = yf.download(ticker, **kwargs)
     if data is None or data.empty:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        # Carry an empty *DatetimeIndex*, not the default RangeIndex: callers
+        # do index arithmetic (e.g. .normalize() for the daily session offset)
+        # before checking emptiness, and "source has nothing" is a normal
+        # outcome — a delisted or placeholder symbol must not fail the run.
+        return pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+            index=pd.DatetimeIndex([], tz=IST, name="ts"),
+        )
 
     # yfinance returns MultiIndex columns like ('Close', 'RELIANCE.NS').
     if isinstance(data.columns, pd.MultiIndex):

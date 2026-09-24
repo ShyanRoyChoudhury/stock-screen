@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+@import "./ds/tokens.css";
+@import "./ds/bundle.css";
+@import "./ds/app.css";
+
+/* Map the old Tailwind token names to the design-system variables so any
+   leftover Tailwind utilities in not-yet-rewritten pages keep working. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-raised);
+  --color-border: var(--line);
+  --color-text: var(--ink);
+  --color-muted: var(--ink-muted);
+  --color-accent: var(--accent);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-exit: var(--exit);
+  --color-partial: var(--partial);
+  --color-review: var(--review);
+  --color-hold: var(--hold);
+  --color-warn: var(--partial);
+  --font-sans: var(--font-sans);
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+#root {
+  min-height: 100%;
+}
+
+/* Tabular numerals for dense numeric columns */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Dense table styles used by the not-yet-rewritten src/components/DataTable.tsx */
+table.dense {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.dense th,
+table.dense td {
+  padding: 4px 8px;
+  height: 28px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+table.dense td.align-right,
+table.dense th.align-right {
+  text-align: right;
+}
+
+table.dense thead th {
+  position: sticky;
+  top: 0;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-weight: 600;
+  z-index: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+table.dense tbody tr:hover {
+  background: var(--color-surface-2);
+}
+
+a {
+  color: inherit;
+}
+
+/* Focus rings for not-yet-rewritten pages outside the .ss scope
+   (bundle.css covers .ss elements with the same tokens). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+

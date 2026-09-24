@@ -49,3 +49,22 @@ def session_close_dt(d: date) -> datetime:
 
 def now_ist() -> datetime:
     return datetime.now(IST)
+
+
+def sessions_between(start: date, end: date) -> int:
+    """Trading sessions strictly after `start`, up to and including `end`.
+    0 when end <= start. Holding periods and match windows count sessions,
+    not calendar days, so a long weekend does not age a position."""
+    if end <= start:
+        return 0
+    cal = _calendar()
+    n = len(cal.sessions_in_range(start.isoformat(), end.isoformat()))
+    return n - 1 if is_trading_day(start) else n
+
+
+def shift_sessions(d: date, n: int) -> date:
+    """The trading day `n` sessions after `d` (negative n = before). When `d`
+    itself is not a session, it is first snapped back to the previous one."""
+    cal = _calendar()
+    anchor = cal.date_to_session(d.isoformat(), direction="previous")
+    return cal.session_offset(anchor, n).date()
