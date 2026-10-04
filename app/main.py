@@ -6,9 +6,11 @@ from sqlalchemy import text
 
 from app.db import assert_schema_current, engine
 from app.routers import (
+    admin,
     brokers,
     candles,
     corporate_actions,
+    fyers,
     indicators,
     ingest,
     positions,
@@ -40,6 +42,8 @@ app.include_router(corporate_actions.router)
 app.include_router(users.router)
 app.include_router(brokers.router)
 app.include_router(positions.router)
+app.include_router(fyers.router)
+app.include_router(admin.router)
 
 
 @app.get("/health")

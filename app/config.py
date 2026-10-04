@@ -1,4 +1,4 @@
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,11 +18,23 @@ class Settings(BaseSettings):
     # Incremental runs re-fetch this many days before the last stored candle;
     # the upsert dedupes and picks up any revisions Yahoo published.
     incremental_overlap_days: int = 2
+    # Market-data provider for ingestion: "yfinance" (legacy) or "fyers".
+    # Stays "yfinance" until the cutover so rows from the two are never mixed.
+    price_source: str = "yfinance"
     # Fernet key encrypting broker_accounts.credentials_enc / access_token_enc.
     # Unset until a deployment generates one; app.brokers.crypto raises on use.
     broker_master_key: SecretStr | None = None
     # Timeout for outbound Groww API calls, in seconds.
     groww_request_timeout: int = 30
+    # Fyers API v3 (OAuth login happens in the app; see app.ingest.fyers_session).
+    fyers_client_id: str = ""
+    fyers_secret_key: SecretStr | None = None
+    # Must equal the redirect URL registered on the Fyers app, e.g.
+    # https://<host>/fyers/callback (a UI route that POSTs the auth_code back).
+    fyers_redirect_uri: str = ""
+    # Max Fyers requests per second across a run (the API throttles above ~3.6).
+    fyers_rps: float = 3.0
+    fyers_request_timeout: int = 30
     # How many trading sessions after a fill to search for a matching signal.
     match_window_sessions: int = 5
     # Max % gap between a signal's entry and the fill price to still match.
@@ -33,6 +45,14 @@ class Settings(BaseSettings):
     swing_review_after_sessions: int = 30
     # Sessions ahead of an upcoming corporate action to start warning on it.
     upcoming_action_warn_sessions: int = 5
+
+    @field_validator("price_source")
+    @classmethod
+    def _check_price_source(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("yfinance", "fyers"):
+            raise ValueError(f"price_source must be 'yfinance' or 'fyers', got {v!r}")
+        return v
 
 
 settings = Settings()

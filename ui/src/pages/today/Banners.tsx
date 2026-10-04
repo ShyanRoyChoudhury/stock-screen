@@ -8,7 +8,7 @@
 
 import { useNavigate } from 'react-router'
 import { Banner, Button, fmt } from '../../ds'
-import { useBrokerAccounts, useRuns } from '../../api/hooks'
+import { useBrokerAccounts, useFyersStatus, useRuns } from '../../api/hooks'
 import { useSettings } from '../../lib/settings'
 import type { BrokerAccount } from '../../api/types'
 import { expectedSyncDate } from './utils'
@@ -35,6 +35,7 @@ export function Banners({ session }: { session: string }) {
   const ingest = runs.find((r) => r.mode === 'incremental' || r.mode === 'backfill')
 
   const { data: accountsData } = useBrokerAccounts({ enabled: !!settings.apiKey })
+  const { data: fyers } = useFyersStatus({ enabled: !!settings.apiKey })
   const expected = expectedSyncDate()
   const alerting = settings.apiKey
     ? (accountsData ?? [])
@@ -55,6 +56,19 @@ export function Banners({ session }: { session: string }) {
           }
         >
           {running.symbols_ok}/{running.symbols_total} symbols. Triggers are disabled until it finishes.
+        </Banner>
+      ) : null}
+      {settings.apiKey && fyers && !fyers.connected ? (
+        <Banner
+          tone="degraded"
+          title="Fyers login needed — today’s prices won’t update"
+          actions={
+            <Button variant="primary" size="sm" onClick={() => navigate('/admin')}>
+              Open Admin
+            </Button>
+          }
+        >
+          The price feed needs a browser login once per trading day.
         </Banner>
       ) : null}
       {alerting.map(({ account: a, kind }) => {

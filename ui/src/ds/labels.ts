@@ -51,6 +51,7 @@ export const NAV: NavItem[] = [
   { id: 'trades', label: 'Trades', icon: 'trades' as IconName, kbd: 'g r' },
   { id: 'brokers', label: 'Brokers', icon: 'brokers' as IconName, kbd: 'g b' },
   { id: 'ops', label: 'Data & Ops', icon: 'ops' as IconName, kbd: 'g o' },
+  { id: 'admin', label: 'Admin', icon: 'settings' as IconName, kbd: 'g a' },
   { section: 'Derivatives' },
   { id: 'options', label: 'Options', icon: 'options' as IconName, disabled: true, badge: 'Later' },
 ]

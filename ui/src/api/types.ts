@@ -84,3 +84,10 @@ export interface LedgerResult { buys_opened: number; sells_allocated: number; or
 export interface SyncResult { trades: { received: number; upserted: number; unmapped: number }; holdings: number; ledger: LedgerResult | null }
 export interface ImportResult { rows: number; upserted: number; unmapped: number; ledger: LedgerResult | null }
 export class ApiError extends Error { constructor(public status: number, message: string, public detail?: unknown) { super(message) } }
+
+export interface FyersStatus { connected: boolean; expires_at: string | null; logged_in_by: string | null; logged_in_at: string | null }
+export interface AdminSettings {
+  daily_job_time: string; recheck_time: string; daily_job_enabled: boolean
+  daily_job_last_run: string | null; recheck_last_run: string | null
+}
+export type AdminSettingsUpdate = Partial<Pick<AdminSettings, 'daily_job_time' | 'recheck_time' | 'daily_job_enabled'>>

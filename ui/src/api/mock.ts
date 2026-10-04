@@ -12,9 +12,11 @@ import type {
   Evaluation,
   SyncResult,
   ImportResult,
+  FyersStatus,
+  AdminSettings,
 } from './types'
 
-const MOCK_PREFIXES = ['/me', '/broker-accounts', '/positions']
+const MOCK_PREFIXES = ['/me', '/broker-accounts', '/positions', '/fyers', '/admin']
 
 export function isMockRoute(path: string): boolean {
   const pathname = path.split('?')[0]
@@ -30,6 +32,16 @@ function delay(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const ME: User = { id: 59, name: 'ui-dev', email: 'ui-dev@local.invalid', created_at: '2026-01-05T09:00:00Z' }
+
+let FYERS: FyersStatus = { connected: false, expires_at: null, logged_in_by: null, logged_in_at: null }
+
+let ADMIN_SETTINGS: AdminSettings = {
+  daily_job_time: '19:00',
+  recheck_time: '21:30',
+  daily_job_enabled: true,
+  daily_job_last_run: '2026-10-02',
+  recheck_last_run: null,
+}
 
 const BROKER_ACCOUNTS: BrokerAccount[] = [
   {
@@ -440,6 +452,30 @@ export async function mockFetch<T>(rawPath: string, req: MockRequest): Promise<T
 
   // --- /me ---------------------------------------------------------------
   if (pathname === '/me' && method === 'GET') return ok(ME) as T
+
+  // --- /fyers, /admin ------------------------------------------------------
+  if (pathname === '/fyers/status' && method === 'GET') return ok(FYERS) as T
+  if (pathname === '/fyers/login-url' && method === 'POST') return ok({ url: '/fyers/callback?s=ok&code=200&auth_code=mock&state=mock' }) as T
+  if (pathname === '/fyers/session' && method === 'POST') {
+    const exp = new Date()
+    exp.setUTCDate(exp.getUTCDate() + 1)
+    exp.setUTCHours(0, 30, 0, 0) // 06:00 IST
+    FYERS = { connected: true, expires_at: exp.toISOString(), logged_in_by: ME.name, logged_in_at: new Date().toISOString() }
+    return ok(FYERS) as T
+  }
+  if (pathname === '/fyers/session' && method === 'DELETE') {
+    FYERS = { connected: false, expires_at: null, logged_in_by: null, logged_in_at: null }
+    return undefined as T
+  }
+  if (pathname === '/admin/settings' && method === 'GET') return ok(ADMIN_SETTINGS) as T
+  if (pathname === '/admin/settings' && method === 'PUT') {
+    const t = /^([01]\d|2[0-3]):[0-5]\d$/
+    for (const k of ['daily_job_time', 'recheck_time'] as const) {
+      if (k in body && !t.test(String(body[k]))) throw new ApiError(422, `${k} must be HH:MM`)
+    }
+    ADMIN_SETTINGS = { ...ADMIN_SETTINGS, ...(body as Partial<AdminSettings>) }
+    return ok(ADMIN_SETTINGS) as T
+  }
 
   // --- /broker-accounts ----------------------------------------------------
   if (pathname === '/broker-accounts' && method === 'GET') return ok(BROKER_ACCOUNTS) as T

@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from './endpoints'
-import type { Broker, Strategy, Timeframe } from './types'
+import type { AdminSettingsUpdate, Broker, Strategy, Timeframe } from './types'
 import type { CandleParams, FreshSignalsParams, ListCorporateActionsParams, ListSignalsParams, ListTradesParams } from './endpoints'
 
 const MARKET_STALE_TIME = 60_000
@@ -22,6 +22,8 @@ export const queryKeys = {
   runs: (limit: number) => ['runs', limit] as const,
   run: (id: number) => ['runs', id] as const,
   me: () => ['me'] as const,
+  fyersStatus: () => ['fyers-status'] as const,
+  adminSettings: () => ['admin-settings'] as const,
   brokerAccounts: () => ['broker-accounts'] as const,
   trades: (params: ListTradesParams) => ['trades', params] as const,
   positions: (status?: 'open' | 'closed') => ['positions', status ?? 'all'] as const,
@@ -303,5 +305,53 @@ export function useReattributeSell() {
       qc.invalidateQueries({ queryKey: ['trades'] })
       qc.invalidateQueries({ queryKey: ['positions'] })
     },
+  })
+}
+
+export function useFyersStatus(opts: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: queryKeys.fyersStatus(),
+    queryFn: () => api.fyersStatus(),
+    staleTime: RUNS_STALE_TIME,
+    retry: false,
+    enabled: opts.enabled ?? true,
+  })
+}
+
+export function useFyersLoginUrl() {
+  return useMutation({ mutationFn: () => api.fyersLoginUrl() })
+}
+
+export function useFyersCompleteLogin() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { auth_code: string; state: string }) => api.fyersCompleteLogin(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.fyersStatus() }),
+  })
+}
+
+export function useFyersLogout() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.fyersLogout(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.fyersStatus() }),
+  })
+}
+
+export function useAdminSettings(opts: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: queryKeys.adminSettings(),
+    queryFn: () => api.getAdminSettings(),
+    staleTime: RUNS_STALE_TIME,
+    retry: false,
+    enabled: opts.enabled ?? true,
+  })
+}
+
+export function useUpdateAdminSettings() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: AdminSettingsUpdate) => api.putAdminSettings(body),
+    onSuccess: (data) => qc.setQueryData(queryKeys.adminSettings(), data),
   })
 }

@@ -33,7 +33,12 @@ VERDICTS = ("HOLD", "PARTIAL", "EXIT", "REVIEW")
 #   total_return — splits and dividends both removed (yfinance auto_adjust=True).
 #                  Not stored: Yahoo re-scales it retroactively on every
 #                  ex-dividend date, so stored rows drift out of date.
-PRICE_BASES = ("splits_only", "unadjusted", "total_return")
+#   fyers_adjusted — split/bonus/rights adjusted by Fyers (bonus ratios are
+#                  rounded, e.g. 1.33), demergers only sometimes, dividends NOT
+#                  adjusted. Treated like splits_only downstream. Fyers can
+#                  re-adjust history retroactively; ingest detects that and
+#                  re-downloads the symbol.
+PRICE_BASES = ("splits_only", "unadjusted", "total_return", "fyers_adjusted")
 PRICE_BASIS_DEFAULT = "splits_only"
 
 # Corporate action types that move the price. NSE publishes many more
@@ -520,5 +525,36 @@ class PositionEvaluation(Base):
     unrealized_pnl_pct: Mapped[float] = mapped_column(Float)
     days_held: Mapped[int] = mapped_column()
     computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DataFeedSession(Base):
+    """The shared market-data feed login (one row per provider, 'fyers').
+
+    `access_token_enc` is Fernet-encrypted (app.brokers.crypto); `expires_at`
+    comes from the token's JWT `exp` claim. Never exposed by the API.
+    """
+
+    __tablename__ = "data_feed_sessions"
+
+    provider: Mapped[str] = mapped_column(String(16), primary_key=True)
+    access_token_enc: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    logged_in_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    logged_in_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AppSetting(Base):
+    """Key-value admin settings (see app.settings_store for keys/defaults)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[object] = mapped_column(JSONB)
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

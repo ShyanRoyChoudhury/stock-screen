@@ -34,6 +34,11 @@ All settings, in `app/config.py` order:
 | `INCREMENTAL_OVERLAP_DAYS` | `incremental_overlap_days` | `2` | An incremental ingest re-fetches this many days before the last stored candle; the upsert dedupes and also picks up any Yahoo revisions |
 | `BROKER_MASTER_KEY` | `broker_master_key` | unset (`None`) | Fernet key encrypting `broker_accounts.credentials_enc` / `access_token_enc`. Unset until generated; `app.brokers.crypto` raises `MasterKeyMissing` on first use |
 | `GROWW_REQUEST_TIMEOUT` | `groww_request_timeout` | `30` | Timeout (seconds) for outbound Groww API calls |
+| `FYERS_CLIENT_ID` | `fyers_client_id` | `""` | Fyers API app id, e.g. `XXXX-100` |
+| `FYERS_SECRET_KEY` | `fyers_secret_key` | unset (`None`) | Fyers app secret (`SecretStr`; used for `appIdHash`, never logged) |
+| `FYERS_REDIRECT_URI` | `fyers_redirect_uri` | `""` | Must equal the redirect URL registered on the Fyers app: `https://<host>/fyers/callback` (a UI route; the web server must serve `index.html` for it) |
+| `FYERS_RPS` | `fyers_rps` | `3.0` | Max Fyers requests/second (used by the fetcher, Step 2) |
+| `FYERS_REQUEST_TIMEOUT` | `fyers_request_timeout` | `30` | Timeout (seconds) for outbound Fyers calls |
 | `MATCH_WINDOW_SESSIONS` | `match_window_sessions` | `5` | Trading sessions after a fill to search for a matching signal |
 | `MATCH_MAX_PRICE_GAP_PCT` | `match_max_price_gap_pct` | `5.0` | Max % gap between a signal's entry and the fill price to still count as a match |
 | `CHANDELIER_ATR_MULTIPLE` | `chandelier_atr_multiple` | `2.5` | ATR multiple for the chandelier trailing stop on matched positions |
@@ -401,6 +406,36 @@ machine's local time zone**, not IST — that only lands at 15:45–16:15 IST
 if the Mac itself is set to Asia/Kolkata; otherwise adjust `Hour`/`Minute`
 or run it from a box that is on IST.
 
+**Admin-driven scheduler (hosted).** Instead of the fixed 16:15 entry, run
+`scripts/scheduler_tick.py` every 5 minutes. The image has no cron and its
+working directory is `/srv/stock-screen`, so schedule it from the HOST's
+cron, running the image once per tick:
+
+```
+*/5 * * * * docker run --rm --env-file /etc/stockscreen.env -e RUN_MIGRATIONS=0 <image> python scripts/scheduler_tick.py >> /var/log/stockscreen-scheduler.log 2>&1
+```
+
+`docker/entrypoint.sh` runs before the command: it waits for Postgres
+(`WAIT_FOR_DB`, default on; `DB_WAIT_SECONDS`, default 60) and then runs
+`alembic upgrade head` unless `RUN_MIGRATIONS=0`. Without
+`RUN_MIGRATIONS=0` every tick would re-run the migration and could race the
+API container; the tick only verifies the schema (`assert_schema_current`).
+Keep the wait (leave `WAIT_FOR_DB` unset) so a tick during a DB restart
+retries instead of failing. Local equivalent with compose (the `sync`
+service already sets `RUN_MIGRATIONS=0`; the `-e` just makes it explicit):
+
+```
+docker compose run --rm -e RUN_MIGRATIONS=0 sync python scripts/scheduler_tick.py
+```
+
+Each tick takes a Postgres advisory lock (overlapping ticks exit at once),
+reads the job times from the Admin page, and when it is a trading day, the
+IST time has passed `daily_job_time` and `daily_job_last_run` is not today,
+runs the full daily job in-process and records `daily_job_last_run` (even if
+a step failed; fix and re-run from Ops -> Triggers). The `recheck_time` run
+is a logged no-op until the bhavcopy reconcile step exists. `--dry-run`
+logs what would run. The launchd plist stays for local use.
+
 A stuck run can also be reaped standalone:
 `.venv/bin/python scripts/reap_stale_runs.py [--hours 6]`.
 
@@ -600,6 +635,34 @@ curl -s localhost:8000/me -H "X-API-Key: $API_KEY"
 | Method + path | Response |
 |---|---|
 | `GET /me` | `UserOut`: `id, name, email, created_at` |
+
+### `/fyers` (`app/routers/fyers.py`)
+
+The shared market-data feed login (one `data_feed_sessions` row, token
+encrypted with `BROKER_MASTER_KEY`). Any active user may log in; the row
+records who. Tokens expire 06:00 IST, so log in once per trading day from
+**Admin** -> "Log in to Fyers" (-> Fyers -> `/fyers/callback` in the UI).
+
+| Method + path | Notes |
+|---|---|
+| `GET /fyers/status` | `{connected, expires_at, logged_in_by, logged_in_at}`; never the token |
+| `POST /fyers/login-url` | `{url}` for the Fyers `generate-authcode` page; the `state` is encrypted, bound to the user, 10-minute TTL. 503 if `FYERS_*` or `BROKER_MASTER_KEY` unset |
+| `POST /fyers/session` | body `{auth_code, state}`; exchanges the code, stores the token, returns status. 400 bad/expired/foreign state or Fyers rejection |
+| `DELETE /fyers/session` | log out (204) |
+
+### `/admin` (`app/routers/admin.py`)
+
+| Method + path | Notes |
+|---|---|
+| `GET /admin/settings` | `daily_job_time`, `recheck_time` (IST `HH:MM`), `daily_job_enabled`, read-only `daily_job_last_run`, `recheck_last_run` |
+| `PUT /admin/settings` | any of the three editable keys; 422 on a bad `HH:MM` or any other key |
+
+### Admin page (UI `/admin`)
+
+Fyers connection card (status, expiry, who logged in, Log in / Log out) and
+the job settings form. The Today page shows a banner when Fyers is not
+connected. Tables: `data_feed_sessions`, `app_settings` (migration
+`b7c1e4a92f10`; run `alembic upgrade head` before deploying).
 
 ### `/broker-accounts` (`app/routers/brokers.py`)
 
