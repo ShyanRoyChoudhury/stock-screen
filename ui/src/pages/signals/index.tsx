@@ -284,7 +284,7 @@ export default function SignalsPage() {
 
       {timeframe !== '1d' ? (
         <Banner tone="review" title={`${timeframe} is experimental`}>
-          The Yahoo hourly feed doesn’t reconcile with daily bars and ~13% of hourly bars have zero volume. Don’t trade these off this feed.
+          Intraday bars come from Fyers and are checked nightly against the NSE bhavcopy; the daily timeframe remains the primary, most trusted one.
         </Banner>
       ) : null}
 

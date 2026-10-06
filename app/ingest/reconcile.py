@@ -1,8 +1,7 @@
 """Pure reconciliation rules: stored Fyers bars vs the NSE bhavcopy row.
 
 No I/O here -- app.ingest.reconcile_service does the loading and writing.
-Differences are signed (ours - NSE). Everything in the reconcile step is
-active only when settings.price_source == "fyers" (see reconcile_active).
+Differences are signed (ours - NSE).
 
 Tolerances are the Step-5 plan defaults, to be tuned after the switchover
 check on 60 sessions:
@@ -13,6 +12,7 @@ check on 60 sessions:
 """
 
 from dataclasses import dataclass, field
+from datetime import date
 
 import pandas as pd
 
@@ -27,12 +27,6 @@ PASS, FAIL, PENDING = "pass", "fail", "pending"
 NOTE_PATCHED = "close patched"
 NOTE_NOT_IN_BHAV = "not in bhavcopy"
 NOTE_NO_BHAV = "bhavcopy not published"
-
-
-def reconcile_active(price_source: str) -> bool:
-    """Gate: reconcile and signal holds exist only on the Fyers feed. On
-    yfinance the hourly feed would fail nearly every day."""
-    return price_source == "fyers"
 
 
 def check_timeframe_for(signal_timeframe: str) -> str:
@@ -147,12 +141,15 @@ def check_hourly(bars: pd.DataFrame | None, bhav_row: dict | None,
 
 # --- signal holds (pure selection; the query lives in signals.service) -----
 
-def held_pairs(rows, cutoff_day) -> set[tuple[int, str]]:
+def held_pairs(rows, cutoff_day, latest_day: date | None = None,
+               ) -> set[tuple[int, str]]:
     """`rows`: iterable of (symbol_id, check_timeframe, day, status).
     Returns {(symbol_id, check_timeframe)} having a fail/pending row on or
-    after `cutoff_day`."""
+    after `cutoff_day` and, when `latest_day` is given, on or before it (rows
+    for a session that has not closed do not hold anything)."""
     return {(sid, tf) for sid, tf, day, status in rows
-            if status in (FAIL, PENDING) and day >= cutoff_day}
+            if status in (FAIL, PENDING) and day >= cutoff_day
+            and (latest_day is None or day <= latest_day)}
 
 
 def is_held(held: set[tuple[int, str]], symbol_id: int, signal_tf: str) -> bool:

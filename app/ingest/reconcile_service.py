@@ -1,6 +1,5 @@
 """Nightly bhavcopy reconcile: stored Fyers bars vs NSE, written to bar_checks.
 
-Active only when settings.price_source == "fyers" (otherwise a logged no-op).
 Rules live in app.ingest.reconcile (pure); this module loads candles, fetches
 the bhavcopy, applies the hourly last-close patch and upserts bar_checks.
 
@@ -8,11 +7,13 @@ Scope of a run:
   - the newest session `day` AND every earlier session ingest's overlap
     re-fetch re-wrote (see refetched_days): every active symbol, 1d and 1h.
     The re-fetch overwrites patched closes with raw Fyers values, so those
-    days must be re-checked (and re-patched) every run;
-  - every existing 'pending' row, any day (bhavcopy may now be published);
+    days must be re-checked (and re-patched) every run. `day` is never a
+    session that has not closed (see check_day): its bhavcopy cannot exist;
+  - every existing 'pending' row up to `day` (bhavcopy may now be published);
   - every 'fail' row within the last `signal_check_lookback_sessions`
     sessions, so a day that ingest's overlap re-fetch has since corrected
     clears itself.
+Rows dated after `day` are left alone until that session is the checked one.
 """
 
 import logging
@@ -30,7 +31,13 @@ from app.ingest import reconcile as rules
 from app.ingest.bhavcopy import eq_row, fetch_bhavcopy
 from app.ingest.resample import resample_1h_to_4h
 from app.ingest.service import FYERS_BASIS, FYERS_SOURCE, upsert_candles
-from app.market_calendar import IST, is_trading_day, last_trading_day, shift_sessions
+from app.market_calendar import (
+    IST,
+    is_trading_day,
+    last_closed_session,
+    now_ist,
+    shift_sessions,
+)
 from app.models import BarCheck, Candle, Symbol
 
 logger = logging.getLogger(__name__)
@@ -162,21 +169,61 @@ def _fail_cutoff(newest_day: date) -> date:
     return shift_sessions(newest_day, -(settings.signal_check_lookback_sessions - 1))
 
 
+def is_resolved(prev_status: str | None, new_status: str) -> bool:
+    """Pure: a row that was holding its signals (pending/fail) and now passes."""
+    return prev_status in (rules.PENDING, rules.FAIL) and new_status == rules.PASS
+
+
+def classify_change(prev_status: str | None, new_status: str, patched: bool) -> bool:
+    """Pure: did this row change what its signals should be generated from?
+
+    True when it was resolved (pending/fail -> pass: the signal hold lifts, so
+    signals skipped earlier are now due) or its last 1h close was patched in
+    this run. A row that stays pass/fail/pending, or drops from pass to
+    fail/pending (held rows are skipped by signals anyway), is not a change."""
+    return patched or is_resolved(prev_status, new_status)
+
+
+def _load_prev_checks(session: Session, d: date, symbol_ids: set[int],
+                      ) -> dict[tuple[int, str], tuple[str, str | None]]:
+    """{(symbol_id, timeframe): (status, note)} stored for day `d`, read BEFORE
+    this run overwrites them."""
+    rows = session.execute(
+        select(BarCheck.symbol_id, BarCheck.timeframe, BarCheck.status, BarCheck.note)
+        .where(BarCheck.day == d, BarCheck.symbol_id.in_(symbol_ids)))
+    return {(r.symbol_id, r.timeframe): (r.status, r.note) for r in rows}
+
+
+def check_day(requested: date | None, now: datetime) -> date:
+    """Pure: the newest session a run checks -- never one that has not closed.
+
+    A session that has not closed (a catch-up run at 08:30, or just after
+    midnight) has no bhavcopy yet, so checking it would upsert every active
+    symbol 'pending' and hold all their signals until the evening run. `None`
+    -> the newest closed session; a `requested` day after it is clamped to it;
+    an explicit day on or before it is used as given (a past day still works)."""
+    closed = last_closed_session(now)
+    if requested is None:
+        return closed
+    if requested > closed:
+        logger.info("session %s has not closed yet; checking %s", requested, closed)
+        return closed
+    return requested
+
+
 def run_reconcile(day: date | None = None, symbols: list[str] | None = None,
                   session: Session | None = None) -> dict:
-    """Run the reconcile. Returns a summary dict; {"skipped": True, ...} when
-    price_source is not fyers. Opens (and closes) its own session unless one
-    is passed."""
-    if not rules.reconcile_active(settings.price_source):
-        msg = f"reconcile skipped: price_source is {settings.price_source}"
-        logger.info(msg)
-        return {"skipped": True, "message": msg, "pass": 0, "fail": 0,
-                "pending": 0, "patched": 0, "worst": []}
-
+    """Run the reconcile. `day` (default: the newest session that has closed;
+    a later one is clamped to it, see check_day) is the newest session to
+    check. Returns a summary dict: the checked `day`, the status counts,
+    `patched` (close patches applied), `resolved` (pending/fail rows that now
+    pass), `changed_symbols` (sorted names with a resolved row or a close
+    patch: the ones whose signals need regenerating) and `worst`. Opens (and
+    closes) its own session unless one is passed."""
     own = session is None
     session = session or SessionLocal()
     try:
-        return _run(session, day or last_trading_day(), symbols)
+        return _run(session, check_day(day, now_ist()), symbols)
     finally:
         if own:
             session.close()
@@ -196,6 +243,10 @@ def _run(session: Session, day: date, symbols: list[str] | None) -> dict:
         or_(BarCheck.status == rules.PENDING,
             and_(BarCheck.status == rules.FAIL, BarCheck.day >= cutoff)))
     open_rows = [tuple(r) for r in session.execute(open_stmt)]
+    # Rows dated after the checked day belong to a session that has not closed
+    # (legacy: runs before check_day existed wrote 'pending' rows for one).
+    # Leave them; they are re-checked once that session is the checked one.
+    open_rows = [r for r in open_rows if r[1] <= day]
     if symbols:
         open_rows = [r for r in open_rows if r[0] in names]
     extra_ids = {r[0] for r in open_rows} - set(names)
@@ -208,6 +259,8 @@ def _run(session: Session, day: date, symbols: list[str] | None) -> dict:
                              settings.incremental_overlap_days)
     counts = {rules.PASS: 0, rules.FAIL: 0, rules.PENDING: 0}
     patched = 0
+    resolved = 0
+    changed: set[str] = set()  # symbols whose signals need regenerating
     fails: list[tuple[float, str]] = []
 
     for d in sorted(targets):
@@ -228,16 +281,12 @@ def _run(session: Session, day: date, symbols: list[str] | None) -> dict:
             continue
 
         candles = _load_day_candles(session, d, {sid for sid, _ in keys})
-        prev_notes = {
-            (r.symbol_id, r.timeframe): r.note for r in session.execute(
-                select(BarCheck.symbol_id, BarCheck.timeframe, BarCheck.note)
-                .where(BarCheck.day == d,
-                       BarCheck.symbol_id.in_({sid for sid, _ in keys})))
-        }
+        prev = _load_prev_checks(session, d, {sid for sid, _ in keys})
         # A calendar-unknown day (e.g. a Muhurat session) has no fixed bar count.
         expected = rules.HOURLY_BARS if is_trading_day(d) else None
 
         for sid, tf in sorted(keys):
+            prev_status, prev_note = prev.get((sid, tf), (None, None))
             row = eq_row(bhav, names[sid])
             bars = candles.get((sid, tf))
             res = evaluate(tf, bars, row, expected)
@@ -245,13 +294,17 @@ def _run(session: Session, day: date, symbols: list[str] | None) -> dict:
                     and res.status == rules.PASS and not res.note:
                 res.note = f"series {row['SctySrs']}"
             if (res.status == rules.PASS and res.patch is None
-                    and prev_notes.get((sid, tf)) == rules.NOTE_PATCHED):
+                    and prev_note == rules.NOTE_PATCHED):
                 res.note = rules.NOTE_PATCHED  # patched on an earlier run
             if res.patch is not None:
                 _apply_patch(session, sid, bars, res.patch)
                 patched += 1
             _upsert_check(session, sid, d, tf, res)
             counts[res.status] += 1
+            if is_resolved(prev_status, res.status):
+                resolved += 1
+            if classify_change(prev_status, res.status, res.patch is not None):
+                changed.add(names[sid])
             if res.status == rules.FAIL:
                 fails.append((res.max_abs_price_diff(),
                               f"{names[sid]} {tf} {d}: {res.note}"))
@@ -259,9 +312,13 @@ def _run(session: Session, day: date, symbols: list[str] | None) -> dict:
 
     fails.sort(key=lambda x: -x[0])
     summary = {
-        "skipped": False, "day": str(day), "pass": counts[rules.PASS],
+        "day": str(day), "pass": counts[rules.PASS],
         "fail": counts[rules.FAIL], "pending": counts[rules.PENDING],
-        "patched": patched, "worst": [w for _, w in fails[:WORST_N]],
+        "patched": patched, "resolved": resolved,
+        "changed_symbols": sorted(changed),
+        "worst": [w for _, w in fails[:WORST_N]],
     }
-    logger.info("reconcile %s: %s", day, {k: v for k, v in summary.items() if k != "worst"})
+    logger.info("reconcile %s: %s, %d symbol(s) changed", day,
+                {k: v for k, v in summary.items() if k not in ("worst", "changed_symbols")},
+                len(changed))
     return summary

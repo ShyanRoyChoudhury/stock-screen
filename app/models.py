@@ -26,20 +26,24 @@ TRADE_SIDES = ("BUY", "SELL")
 POSITION_STATUSES = ("open", "closed")
 VERDICTS = ("HOLD", "PARTIAL", "EXIT", "REVIEW")
 
-# Adjustment conventions a stored price series can be on.
-#   splits_only  — split/bonus adjusted, dividends left in the price.
-#                  yfinance auto_adjust=False, and TradingView's native basis.
+# Adjustment conventions a stored price series can be on. Every candle write
+# is fyers_adjusted (app.ingest.service.FYERS_BASIS), and that is also the
+# Python and server default of candles.price_basis (migration c85fe6dc94cf).
+# The other values are legacy (old rows, history, comparisons) and are kept so
+# they stay valid.
+#   splits_only  — LEGACY: split/bonus adjusted, dividends left in the price
+#                  (the former yfinance rows; TradingView's native basis).
 #   unadjusted   — raw traded prices, nothing applied. NSE bhavcopy.
 #   total_return — splits and dividends both removed (yfinance auto_adjust=True).
 #                  Not stored: Yahoo re-scales it retroactively on every
 #                  ex-dividend date, so stored rows drift out of date.
-#   fyers_adjusted — split/bonus/rights adjusted by Fyers (bonus ratios are
+#   fyers_adjusted — CURRENT: split/bonus/rights adjusted by Fyers (bonus ratios are
 #                  rounded, e.g. 1.33), demergers only sometimes, dividends NOT
 #                  adjusted. Treated like splits_only downstream. Fyers can
 #                  re-adjust history retroactively; ingest detects that and
 #                  re-downloads the symbol.
 PRICE_BASES = ("splits_only", "unadjusted", "total_return", "fyers_adjusted")
-PRICE_BASIS_DEFAULT = "splits_only"
+PRICE_BASIS_DEFAULT = "fyers_adjusted"
 
 # Corporate action types that move the price. NSE publishes many more
 # (AGM, EGM, interest payments); those are filtered out at ingest.
@@ -86,7 +90,7 @@ class Candle(Base):
     low: Mapped[float] = mapped_column(Float)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[int] = mapped_column(BigInteger)
-    source: Mapped[str] = mapped_column(String(16), default="yfinance")
+    source: Mapped[str] = mapped_column(String(16), default="fyers")
     # Which adjustment convention these prices are on. NOT part of uq_candle:
     # one basis is canonical at a time, and re-ingesting on a different basis
     # should overwrite rather than duplicate. The column exists so a partially
@@ -566,7 +570,7 @@ class BarCheck(Base):
     timeframe is '1d' or '1h' (4h follows 1h). status: pass | fail | pending
     (bhavcopy not yet published). Diffs are signed, ours minus NSE. Used by
     signal generation to hold symbols whose recent data has not been
-    verified (only when PRICE_SOURCE=fyers). See app.ingest.reconcile.
+    verified. See app.ingest.reconcile.
     """
 
     __tablename__ = "bar_checks"

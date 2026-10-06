@@ -3,7 +3,8 @@ aggregate_1min_to_hourly (1-min -> 7 session-anchored hourly bins) and
 reconcile_day (hourly bars vs a bhavcopy row). Both are plain
 DataFrame-in/dict-out functions with no I/O, so nothing here touches the
 DB -- these are exactly the two pieces the plan (Step 3) later moves into
-app/ingest/resample.py and app/ingest/reconcile.py.
+app/ingest/resample.py and app/ingest/reconcile.py. Also
+compare_adjustment_basis (a Fyers pre-split bar vs bhavcopy's raw prices).
 """
 
 from datetime import date, datetime, timedelta
@@ -12,7 +13,11 @@ import pandas as pd
 import pytest
 
 from app.market_calendar import IST
-from scripts.probe_intraday_source import aggregate_1min_to_hourly, reconcile_day
+from scripts.probe_intraday_source import (
+    aggregate_1min_to_hourly,
+    compare_adjustment_basis,
+    reconcile_day,
+)
 
 DAY = date(2026, 9, 21)  # Monday, plain trading day
 
@@ -264,3 +269,25 @@ def test_reconcile_day_missing_bhav_row_fails_without_raising():
 
     assert result["has_data"] is False
     assert result["all_rules_pass"] is False
+
+
+# --- compare_adjustment_basis: Fyers pre-split bar vs bhavcopy raw -----------
+
+def test_adjustment_basis_matching_the_raw_bhavcopy_is_unadjusted():
+    assert compare_adjustment_basis(200.0, 190.0, 200.0, 190.0) == "unadjusted (raw)"
+    # within one tick still counts as a match
+    assert compare_adjustment_basis(200.04, 189.96, 200.0, 190.0) == "unadjusted (raw)"
+
+
+def test_adjustment_basis_differing_from_raw_bhavcopy_is_adjusted():
+    # e.g. a 1:1 bonus: raw 200/190 became 100/95 in an adjusted series
+    assert compare_adjustment_basis(100.0, 95.0, 200.0, 190.0) == (
+        "adjusted (differs from bhavcopy raw)")
+    # high matches but low does not -> still a miss
+    assert compare_adjustment_basis(200.0, 95.0, 200.0, 190.0) == (
+        "adjusted (differs from bhavcopy raw)")
+
+
+def test_adjustment_basis_without_a_bhavcopy_row_is_unknown():
+    assert compare_adjustment_basis(100.0, 95.0, None, None) == "unknown (no bhavcopy row)"
+    assert compare_adjustment_basis(100.0, 95.0, 200.0, None) == "unknown (no bhavcopy row)"

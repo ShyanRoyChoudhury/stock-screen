@@ -192,7 +192,7 @@ export function TimeframeBadge({ timeframe = '1d' }: TimeframeBadgeProps): React
   return (
     <span
       className={cx('ss-tf', exp && 'ss-tf-exp')}
-      title={exp ? 'Experimental: Yahoo hourly feed does not reconcile with daily bars; ~13% zero-volume bars.' : 'Daily — primary, trusted'}
+      title={exp ? 'Intraday: Fyers hourly bars, checked nightly against the NSE bhavcopy; daily is the primary timeframe.' : 'Daily — primary, trusted'}
     >
       {timeframe}
     </span>

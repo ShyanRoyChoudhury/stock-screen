@@ -8,7 +8,6 @@ import pandas as pd
 import pytest
 import requests
 
-import app.ingest.fetcher as fetcher_mod
 import app.ingest.fyers_fetcher as ff
 from app.ingest.fyers_session import FyersLoginRequired
 from app.market_calendar import IST
@@ -46,7 +45,7 @@ def fast(monkeypatch):
     monkeypatch.setattr(ff.settings, "fyers_rps", 1000.0)
     monkeypatch.setattr(ff._limiter, "_next", 0.0)
     # "now" far after the fixture bars so nothing is dropped as incomplete.
-    monkeypatch.setattr(fetcher_mod, "now_ist", lambda: datetime(2026, 10, 1, 12, 0, tzinfo=IST))
+    monkeypatch.setattr(ff, "now_ist", lambda: datetime(2026, 10, 1, 12, 0, tzinfo=IST))
     return sleeps
 
 
@@ -102,7 +101,7 @@ def test_parse_and_cleanup_hourly_fixture():
 
 
 def test_incomplete_last_candle_dropped(monkeypatch):
-    monkeypatch.setattr(fetcher_mod, "now_ist", lambda: datetime(2026, 9, 10, 15, 20, tzinfo=IST))
+    monkeypatch.setattr(ff, "now_ist", lambda: datetime(2026, 9, 10, 15, 20, tzinfo=IST))
     f, _ = mk([Resp(json.loads(FIXTURE.read_text()))])
     df = f.fetch_bars("INFY", "60m", date(2026, 9, 9), date(2026, 9, 10))
     assert df.index[-1] == pd.Timestamp("2026-09-10 14:15", tz=IST)

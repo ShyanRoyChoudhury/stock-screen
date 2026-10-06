@@ -108,7 +108,7 @@ function JobSettingsCard({ enabled }: { enabled: boolean }) {
               value={d.recheck_time}
               onChange={(e) => setDraft({ ...d, recheck_time: e.target.value })}
               error={timeErr(d.recheck_time)}
-              hint="Bhavcopy re-check and signals. Not active yet."
+              hint="Re-checks a late bhavcopy; regenerates signals only for stocks whose check changed."
             />
             <KV
               items={[

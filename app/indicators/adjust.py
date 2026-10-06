@@ -1,8 +1,9 @@
 """Read-time price adjustment from the corporate actions table.
 
-Candles are stored splits_only (yfinance, see fetch_ohlcv) or fyers_adjusted
-(Fyers: split/bonus/rights adjusted, dividends not — the same dividend-
-unadjusted shape as splits_only, so both are handled identically here). This turns that stored
+Candles are now stored fyers_adjusted (split/bonus/rights adjusted by Fyers,
+bonus ratios rounded, demergers sometimes, dividends not). Legacy rows may
+still say splits_only: the same dividend-unadjusted shape, handled
+identically here. This turns that stored
 series into any other convention on demand, so the stored numbers stay
 immutable while the convention becomes a query parameter.
 
@@ -102,8 +103,8 @@ def volume_factor_series(
     window spanning a 2:1 split reads a phantom 2x surge. Dividends do not
     change share count.
 
-    Only 'unadjusted' volume (NSE bhavcopy) needs this. yfinance volume is
-    already split- and bonus-adjusted, like its price: RELIANCE's volume shows
+    Only 'unadjusted' volume (NSE bhavcopy) needs this. Legacy yfinance volume
+    was already split- and bonus-adjusted, like its price: RELIANCE's volume shows
     no 2x step across its 2024-10-28 1:1 bonus (median 17.9M before, 13.6M
     after). Applying this to splits_only volume would double-adjust it, so
     that case returns 1.0. Fyers volume is likewise split-adjusted

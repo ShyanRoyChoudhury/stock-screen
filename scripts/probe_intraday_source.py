@@ -389,27 +389,6 @@ def reconciliation_sessions(n: int) -> list[date]:
 # bhavcopy download/lookup lives in app.ingest.bhavcopy (fetch_bhavcopy, eq_row).
 
 
-def stored_hourly(conn, symbol_id: int, day: date, timeframe: str = "1h",
-                   source: str = "yfinance") -> pd.DataFrame:
-    """Our stored candles for one symbol-day (used for the Yahoo side-by-side
-    and, at timeframe='1d', the split-adjusted adjustment-basis check)."""
-    rows = conn.execute(text("""
-        SELECT ts, open, high, low, close, volume
-        FROM candles
-        WHERE symbol_id = :sid AND timeframe = :tf AND source = :src
-          AND (ts AT TIME ZONE 'Asia/Kolkata')::date = :d
-        ORDER BY ts
-    """), {"sid": symbol_id, "tf": timeframe, "src": source, "d": day}).fetchall()
-    if not rows:
-        return pd.DataFrame(
-            columns=["open", "high", "low", "close", "volume"],
-            index=pd.DatetimeIndex([], tz=IST, name="ts"),
-        )
-    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
-    df["ts"] = pd.to_datetime(df["ts"], utc=True).dt.tz_convert(IST)
-    return df.set_index("ts")
-
-
 # ================================================== pure: aggregation =====
 
 def _bin_start(ts) -> datetime | None:
@@ -566,26 +545,17 @@ def reconcile_day(hourly: pd.DataFrame, bhav_row: dict | None) -> dict:
 
 
 def compare_adjustment_basis(fyers_high: float, fyers_low: float,
-                              splits_only_high: float | None, splits_only_low: float | None,
                               bhav_high: float | None, bhav_low: float | None,
                               tol: float = PRICE_TICK) -> str:
-    """Which basis Fyers' pre-split/bonus bars match: our stored
-    `splits_only` daily candle (adjusted) or bhavcopy (raw/unadjusted)."""
-    matches_adjusted = (
-        splits_only_high is not None and splits_only_low is not None
-        and abs(fyers_high - splits_only_high) <= tol and abs(fyers_low - splits_only_low) <= tol
-    )
-    matches_raw = (
-        bhav_high is not None and bhav_low is not None
-        and abs(fyers_high - bhav_high) <= tol and abs(fyers_low - bhav_low) <= tol
-    )
-    if matches_adjusted and matches_raw:
-        return "both (no split effect yet at this tolerance)"
-    if matches_adjusted:
-        return "splits_only (adjusted)"
-    if matches_raw:
+    """Whether Fyers' bar from just BEFORE a split/bonus is on the raw basis
+    or already adjusted, judged against bhavcopy's raw traded high/low (the
+    only independent reference left now that every stored candle is Fyers'
+    own): a match within `tol` means raw, a miss means adjusted."""
+    if bhav_high is None or bhav_low is None:
+        return "unknown (no bhavcopy row)"
+    if abs(fyers_high - bhav_high) <= tol and abs(fyers_low - bhav_low) <= tol:
         return "unadjusted (raw)"
-    return "neither"
+    return "adjusted (differs from bhavcopy raw)"
 
 
 # ============================================================ reporting ===
@@ -764,53 +734,44 @@ def main(argv: list[str] | None = None) -> int:
     # ---- d. reconciliation over `sessions` -------------------------------
     _banner(f"RECONCILIATION (d) -- {len(sessions)} sessions x {len(all_syms)} symbols")
     bhav_cache: dict[date, pd.DataFrame | None] = {}
-    native_results, agg_results, yahoo_results = [], [], []
+    native_results, agg_results = [], []
     csv_rows = []
 
-    with engine.connect() as conn:
-        for day in sessions:
-            if day not in bhav_cache:
-                bhav_cache[day] = fetch_bhavcopy(day)
-            bhav = bhav_cache[day]
-            if bhav is None:
-                print(f"[WARN] bhavcopy unavailable for {day}, skipping this session")
+    for day in sessions:
+        if day not in bhav_cache:
+            bhav_cache[day] = fetch_bhavcopy(day)
+        bhav = bhav_cache[day]
+        if bhav is None:
+            print(f"[WARN] bhavcopy unavailable for {day}, skipping this session")
+            continue
+        for sym in all_syms:
+            bhav_row = bhav_row_for(bhav, sym)
+            if bhav_row is None:
                 continue
-            for sym in all_syms:
-                bhav_row = bhav_row_for(bhav, sym)
-                if bhav_row is None:
-                    continue
-                fsym = FYERS_SYMBOL_FMT.format(sym)
+            fsym = FYERS_SYMBOL_FMT.format(sym)
 
-                native_df = fetch_day_bars(fyers, fsym, "60", day, limiter)
-                native_res = reconcile_day(native_df, bhav_row)
-                native_res.update(symbol=sym, day=day)
-                native_results.append(native_res)
-                csv_rows.append(_csv_row(sym, day, "fyers_60m", native_res))
+            native_df = fetch_day_bars(fyers, fsym, "60", day, limiter)
+            native_res = reconcile_day(native_df, bhav_row)
+            native_res.update(symbol=sym, day=day)
+            native_results.append(native_res)
+            csv_rows.append(_csv_row(sym, day, "fyers_60m", native_res))
 
-                min1_df = fetch_day_bars(fyers, fsym, "1", day, limiter)
-                agg_df = aggregate_1min_to_hourly(min1_df)
-                agg_res = reconcile_day(agg_df, bhav_row)
-                agg_res.update(symbol=sym, day=day)
-                agg_results.append(agg_res)
-                csv_rows.append(_csv_row(sym, day, "fyers_1m_agg", agg_res))
-
-                yahoo_df = stored_hourly(conn, sym_ids[sym], day)
-                yahoo_res = reconcile_day(yahoo_df, bhav_row)
-                yahoo_res.update(symbol=sym, day=day)
-                yahoo_results.append(yahoo_res)
-                csv_rows.append(_csv_row(sym, day, "yahoo_1h", yahoo_res))
+            min1_df = fetch_day_bars(fyers, fsym, "1", day, limiter)
+            agg_df = aggregate_1min_to_hourly(min1_df)
+            agg_res = reconcile_day(agg_df, bhav_row)
+            agg_res.update(symbol=sym, day=day)
+            agg_results.append(agg_res)
+            csv_rows.append(_csv_row(sym, day, "fyers_1m_agg", agg_res))
 
     _banner("RECONCILIATION RESULTS")
     print_side_by_side([
         ("fyers 60m native", native_results),
         ("fyers 1m agg", agg_results),
-        ("yahoo 1h stored", yahoo_results),
     ])
     print()
     print("diagnostics (the Yahoo defects this probe is checking for):")
     print_diagnostics("fyers 60m native", native_results)
     print_diagnostics("fyers 1m agg", agg_results)
-    print_diagnostics("yahoo 1h stored", yahoo_results)
     print()
     print_worst("fyers 60m native", native_results)
     print()
@@ -823,7 +784,6 @@ def main(argv: list[str] | None = None) -> int:
     for sym, ex_date in split_bonus:
         if sym not in sym_ids:
             continue
-        sid = sym_ids[sym]
         fsym = FYERS_SYMBOL_FMT.format(sym)
         for day in sorted(shift_sessions(ex_date, -i) for i in (1, 2, 3)):
             bars = fetch_day_bars(fyers, fsym, "60", day, limiter)
@@ -832,23 +792,15 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             fyers_high, fyers_low = float(bars["high"].max()), float(bars["low"].min())
 
-            with engine.connect() as conn:
-                stored_1d = stored_hourly(conn, sid, day, timeframe="1d", source="yfinance")
-            so_high = float(stored_1d["high"].iloc[0]) if not stored_1d.empty else None
-            so_low = float(stored_1d["low"].iloc[0]) if not stored_1d.empty else None
-
             if day not in bhav_cache:
                 bhav_cache[day] = fetch_bhavcopy(day)
             bhav_row = bhav_row_for(bhav_cache[day], sym)
             bh_high = float(bhav_row["HghPric"]) if bhav_row else None
             bh_low = float(bhav_row["LwPric"]) if bhav_row else None
 
-            basis = compare_adjustment_basis(
-                fyers_high, fyers_low, so_high, so_low, bh_high, bh_low
-            )
+            basis = compare_adjustment_basis(fyers_high, fyers_low, bh_high, bh_low)
             print(f"  {sym} ex={ex_date} day={day}: fyers hi/lo={fyers_high:.2f}/{fyers_low:.2f}  "
-                  f"stored splits_only hi/lo={so_high}/{so_low}  "
-                  f"bhavcopy raw hi/lo={bh_high}/{bh_low}  -> matches: {basis}")
+                  f"bhavcopy raw hi/lo={bh_high}/{bh_low}  -> fyers is: {basis}")
 
     # ---- rate-limit report (c) ---------------------------------------------
     elapsed = time.monotonic() - started
@@ -883,7 +835,7 @@ def main(argv: list[str] | None = None) -> int:
                    and conservative_depth_days < HOURLY_BACKFILL_TARGET_DAYS)
     if depth_short:
         print(f"[NOTE] history is shorter than the {HOURLY_BACKFILL_TARGET_DAYS}-day target; "
-              "per the plan, accept the shorter history -- do not splice Yahoo data onto it.")
+              "per the plan, accept the shorter history -- do not splice another source onto it.")
 
     csv_path = os.path.join(LOG_DIR, f"reconcile_{now_ist():%Y%m%dT%H%M%S}.csv")
     pd.DataFrame(csv_rows).to_csv(csv_path, index=False)

@@ -1,19 +1,22 @@
 """Step 5 tests: bhavcopy reconcile rules, gating, signal holds, scheduler
 recheck wiring. Pure/fake only: no database, no network."""
 
+import logging
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from app import settings_store
-from app.config import settings
 from app.ingest import reconcile as rc
 from app.ingest import reconcile_service as rs
 from app.ingest.bhavcopy import eq_row, parse_bhavcopy
 from app.market_calendar import IST
+from app.models import BarCheck, Symbol
+from app.signals import service as signals_service
 from scripts import daily_sync, scheduler_tick
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bhavcopy_20261001_sample.csv"
@@ -23,6 +26,12 @@ BHAV = {"OpnPric": 100.0, "HghPric": 110.0, "LwPric": 90.0, "ClsPric": 105.0,
 
 
 # --- helpers ---------------------------------------------------------------
+
+def ist_at(day: int, hh: int, mm: int = 0) -> datetime:
+    """A tz-aware IST clock reading on 2026-10-`day` (Wed 10-07 is a session;
+    Fri 10-02 is an NSE holiday)."""
+    return datetime(2026, 10, day, hh, mm, tzinfo=IST)
+
 
 def daily_bar(**kw):
     bar = {"open": 100.0, "high": 110.0, "low": 90.0, "close": 105.0,
@@ -202,37 +211,6 @@ def test_real_row_drives_the_rules(bhav_frame):
     assert rc.check_daily(dict(bar, volume=16771220), row).status == "fail"
 
 
-# --- gating --------------------------------------------------------------
-
-def test_reconcile_active_only_for_fyers():
-    assert rc.reconcile_active("fyers") is True
-    assert rc.reconcile_active("yfinance") is False
-
-
-def test_run_reconcile_is_a_noop_on_yfinance(monkeypatch):
-    monkeypatch.setattr(settings, "price_source", "yfinance")
-    # no session passed and none opened: would raise if it touched the DB
-    monkeypatch.setattr(rs, "SessionLocal", lambda: pytest.fail("opened a DB session"))
-    out = rs.run_reconcile(date(2026, 10, 1))
-    assert out["skipped"] is True
-    assert out["message"] == "reconcile skipped: price_source is yfinance"
-    assert out["fail"] == out["pending"] == out["patched"] == 0
-
-
-def test_daily_sync_reconcile_step_is_ok_on_yfinance(monkeypatch):
-    monkeypatch.setattr(settings, "price_source", "yfinance")
-    monkeypatch.setattr(daily_sync, "run_reconcile", rs.run_reconcile)
-    monkeypatch.setattr(rs, "SessionLocal", lambda: pytest.fail("opened a DB session"))
-    res = daily_sync._step_reconcile(date(2026, 10, 1), None, [])
-    assert res["status"] == "ok" and "skipped" in res["message"]
-
-
-def test_load_held_is_empty_on_yfinance_without_touching_db(monkeypatch):
-    from app.signals import service
-    monkeypatch.setattr(settings, "price_source", "yfinance")
-    assert service.load_held(session=None) == set()
-
-
 def test_reconcile_step_sits_after_ingest_before_indicators():
     order = daily_sync.STEP_ORDER
     assert order.index("ingest") < order.index("reconcile") < order.index("indicators")
@@ -240,11 +218,23 @@ def test_reconcile_step_sits_after_ingest_before_indicators():
 
 
 def test_reconcile_step_warns_on_fail_or_pending(monkeypatch):
-    base = {"skipped": False, "pass": 5, "fail": 0, "pending": 0, "patched": 1, "worst": []}
+    base = {"day": "2026-10-01", "pass": 5, "fail": 0, "pending": 0, "patched": 1,
+            "worst": []}
     monkeypatch.setattr(daily_sync, "run_reconcile", lambda d, s: base)
     assert daily_sync._step_reconcile(date(2026, 10, 1), None, [])["status"] == "ok"
     monkeypatch.setattr(daily_sync, "run_reconcile", lambda d, s: dict(base, fail=1))
     assert daily_sync._step_reconcile(date(2026, 10, 1), None, [])["status"] == "warning"
+
+
+def test_reconcile_step_message_names_the_checked_day(monkeypatch):
+    # A morning run is asked for Wed 10-07 but checks Tue 10-06: the message
+    # reports what was checked (result["day"]), not what was requested.
+    result = {"day": "2026-10-06", "pass": 1000, "fail": 0, "pending": 0,
+              "patched": 3, "worst": []}
+    monkeypatch.setattr(daily_sync, "run_reconcile", lambda d, s: result)
+    step = daily_sync._step_reconcile(date(2026, 10, 7), None, [])
+    assert step["message"] == "checked 2026-10-06: 1000 pass, 0 fail, 0 pending, 3 close-patched"
+    assert step["detail"]["day"] == "2026-10-06"
 
 
 # --- signal-hold selection --------------------------------------------------
@@ -261,6 +251,93 @@ def test_held_pairs_selects_fail_and_pending_in_window_only():
         (5, "1h", CUTOFF, "fail"),             # on cutoff: inside
     ]
     assert rc.held_pairs(rows, CUTOFF) == {(1, "1d"), (2, "1h"), (5, "1h")}
+
+
+def test_held_pairs_latest_day_ignores_rows_after_it():
+    latest = date(2026, 10, 6)
+    rows = [
+        (1, "1d", latest, "pending"),                # on latest_day: inside
+        (2, "1h", date(2026, 10, 7), "pending"),     # the session that hasn't closed
+        (3, "1d", date(2026, 10, 7), "fail"),
+        (4, "1d", date(2026, 10, 5), "fail"),
+        (5, "1h", CUTOFF, "fail"),                   # on cutoff: inside
+        (6, "1d", date(2026, 9, 2), "fail"),         # before cutoff
+        (7, "1d", date(2026, 10, 5), "pass"),
+    ]
+    assert rc.held_pairs(rows, CUTOFF, latest_day=latest) == {
+        (1, "1d"), (4, "1d"), (5, "1h")}
+    # Omitted: unchanged (backward compatible), later rows count.
+    assert rc.held_pairs(rows, CUTOFF) == {
+        (1, "1d"), (2, "1h"), (3, "1d"), (4, "1d"), (5, "1h")}
+    assert rc.held_pairs(rows, CUTOFF, latest_day=None) == rc.held_pairs(rows, CUTOFF)
+
+
+def test_held_window_anchors_on_the_last_closed_session_not_today(monkeypatch):
+    monkeypatch.setattr(signals_service.settings, "signal_check_lookback_sessions", 3)
+    # Wed 10-07 morning: Wed hasn't closed -> anchor Tue 10-06, window Thu 10-01
+    # .. Tue 10-06 (3 sessions; Fri 10-02 is a holiday).
+    assert signals_service.held_window(ist_at(7, 8, 30)) == (date(2026, 10, 1),
+                                                           date(2026, 10, 6))
+    # After the close the anchor is today.
+    assert signals_service.held_window(ist_at(7, 19, 0)) == (date(2026, 10, 5),
+                                                           date(2026, 10, 7))
+    # Lookback 1 -> the window is the anchor session alone.
+    monkeypatch.setattr(signals_service.settings, "signal_check_lookback_sessions", 1)
+    assert signals_service.held_window(ist_at(7, 8, 30)) == (date(2026, 10, 6),
+                                                           date(2026, 10, 6))
+
+
+def test_held_window_default_now_is_the_ist_clock(monkeypatch):
+    monkeypatch.setattr(signals_service.settings, "signal_check_lookback_sessions", 1)
+    monkeypatch.setattr("app.market_calendar.now_ist", lambda: ist_at(7, 0, 13))
+    assert signals_service.held_window() == (date(2026, 10, 6), date(2026, 10, 6))
+
+
+class _FakeHeldSession:
+    """Just enough Session for signals.service.load_held: records the
+    statement, answers `.execute(stmt).all()` with canned bar_checks rows."""
+
+    def __init__(self, rows):
+        self.rows, self.stmts = list(rows), []
+
+    def execute(self, stmt):
+        self.stmts.append(stmt)
+        return SimpleNamespace(all=lambda: list(self.rows))
+
+
+def test_load_held_ignores_rows_for_a_session_that_has_not_closed(monkeypatch):
+    # The morning-catch-up scenario: Wed 10-07 08:30, an older run left
+    # 'pending' rows for Wed. They must hold nothing.
+    monkeypatch.setattr(signals_service.settings, "signal_check_lookback_sessions", 3)
+    monkeypatch.setattr(signals_service, "last_closed_session",
+                        lambda now=None: date(2026, 10, 6))
+    rows = [
+        (1, "1d", date(2026, 10, 7), "pending"),   # unclosed session: ignored
+        (1, "1h", date(2026, 10, 7), "pending"),
+        (2, "1h", date(2026, 10, 6), "pending"),   # the anchor session: held
+        (3, "1d", date(2026, 10, 1), "fail"),      # on the cutoff: held
+        (4, "1d", date(2026, 9, 30), "fail"),      # before the cutoff
+        (5, "1h", date(2026, 10, 6), "pass"),
+    ]
+    session = _FakeHeldSession(rows)
+    assert signals_service.load_held(session) == {(2, "1h"), (3, "1d")}
+
+    # The query itself is bounded on both sides, so the DB never returns the
+    # unclosed session's rows (the Python filter is the second line of defence).
+    (stmt,) = session.stmts
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "bar_checks.day >= '2026-10-01'" in sql
+    assert "bar_checks.day <= '2026-10-06'" in sql
+    assert "bar_checks.status IN ('fail', 'pending')" in sql
+
+
+def test_load_held_after_the_close_includes_todays_rows(monkeypatch):
+    monkeypatch.setattr(signals_service.settings, "signal_check_lookback_sessions", 3)
+    monkeypatch.setattr(signals_service, "last_closed_session",
+                        lambda now=None: date(2026, 10, 7))
+    rows = [(1, "1d", date(2026, 10, 7), "pending"),
+            (2, "1h", date(2026, 10, 8), "pending")]   # tomorrow's: ignored
+    assert signals_service.load_held(_FakeHeldSession(rows)) == {(1, "1d")}
 
 
 def test_is_held_maps_4h_to_the_1h_check():
@@ -305,6 +382,250 @@ def test_select_targets_covers_overlap_days_for_all_symbols():
     assert date(2026, 10, 10) not in t
 
 
+# --- which session a run checks: never one that hasn't closed ---------------
+
+def test_check_day_default_before_the_close_is_the_previous_session():
+    # Wed 10-07 08:30 (a catch-up run after a missed login the night before)
+    # and 00:13 (the observed run that wrote pending rows for the day).
+    assert rs.check_day(None, ist_at(7, 8, 30)) == date(2026, 10, 6)
+    assert rs.check_day(None, ist_at(7, 0, 13)) == date(2026, 10, 6)
+    assert rs.check_day(None, ist_at(7, 15, 29)) == date(2026, 10, 6)
+
+
+def test_check_day_explicit_today_before_the_close_is_clamped(caplog):
+    # daily_sync passes day=today on a trading day, whatever the time.
+    with caplog.at_level(logging.INFO, logger=rs.logger.name):
+        assert rs.check_day(date(2026, 10, 7), ist_at(7, 8, 30)) == date(2026, 10, 6)
+    assert "session 2026-10-07 has not closed yet; checking 2026-10-06" in caplog.text
+
+
+def test_check_day_explicit_future_day_is_clamped_to_the_newest_closed_session():
+    assert rs.check_day(date(2026, 10, 9), ist_at(7, 19, 0)) == date(2026, 10, 7)
+
+
+def test_check_day_explicit_past_day_is_unchanged(caplog):
+    now = ist_at(7, 8, 30)
+    with caplog.at_level(logging.INFO, logger=rs.logger.name):
+        assert rs.check_day(date(2026, 10, 6), now) == date(2026, 10, 6)  # the newest closed
+        assert rs.check_day(date(2026, 9, 25), now) == date(2026, 9, 25)  # older
+        assert rs.check_day(date(2026, 10, 3), now) == date(2026, 10, 3)  # a non-session day, as given
+    assert "has not closed yet" not in caplog.text
+
+
+def test_check_day_default_after_the_close_is_today():
+    assert rs.check_day(None, ist_at(7, 15, 30)) == date(2026, 10, 7)
+    assert rs.check_day(None, ist_at(7, 19, 0)) == date(2026, 10, 7)
+    assert rs.check_day(date(2026, 10, 7), ist_at(7, 19, 0)) == date(2026, 10, 7)
+
+
+def test_check_day_weekend_and_holiday_runs_check_the_last_session():
+    assert rs.check_day(None, ist_at(10, 10, 0)) == date(2026, 10, 9)   # Sat -> Fri
+    assert rs.check_day(None, ist_at(2, 10, 0)) == date(2026, 10, 1)    # Gandhi Jayanti -> Thu
+
+
+@pytest.mark.parametrize("requested,expected", [
+    (None, date(2026, 10, 6)),
+    (date(2026, 10, 7), date(2026, 10, 6)),
+    (date(2026, 10, 1), date(2026, 10, 1)),
+])
+def test_run_reconcile_hands_the_checked_day_to_the_run(monkeypatch, requested, expected):
+    """run_reconcile -> _run gets check_day(day, now_ist()), not day-or-today."""
+    seen = []
+    monkeypatch.setattr(rs, "_run", lambda session, day, symbols: seen.append(day) or {})
+    monkeypatch.setattr(rs, "now_ist", lambda: ist_at(7, 8, 30))
+    rs.run_reconcile(requested, None, session=object())  # a passed session is not closed
+    assert seen == [expected]
+
+
+# --- change tracking: what the recheck regenerates -------------------------
+
+@pytest.mark.parametrize("prev,new,patched,resolved,changed", [
+    ("pending", "pass", False, True, True),    # bhavcopy arrived: hold lifts
+    ("fail", "pass", False, True, True),       # ingest re-fetch corrected the day
+    ("pending", "pass", True, True, True),     # resolved AND patched
+    ("pass", "pass", True, False, True),       # new close patch, no transition
+    (None, "pass", True, False, True),
+    ("pass", "pass", False, False, False),     # steady state
+    (None, "pass", False, False, False),       # first check of a row: nothing was held
+    ("pending", "pending", False, False, False),
+    ("pending", "fail", False, False, False),  # still held
+    ("fail", "fail", False, False, False),
+    ("fail", "pending", False, False, False),
+    ("pass", "fail", False, False, False),     # held rows are skipped by signals
+    ("pass", "pending", False, False, False),
+])
+def test_resolved_and_changed_classification(prev, new, patched, resolved, changed):
+    assert rs.is_resolved(prev, new) is resolved
+    assert rs.classify_change(prev, new, patched) is changed
+
+
+class _FakeRunSession:
+    """Just enough Session for reconcile_service._run: answers the two
+    selects it issues itself (symbols, open bar_checks rows), counts commits."""
+
+    def __init__(self, symbols, open_rows=()):
+        self.symbols, self.open_rows, self.commits = symbols, list(open_rows), 0
+
+    def execute(self, stmt):
+        entity = stmt.column_descriptions[0]["entity"]
+        if entity is Symbol:
+            return iter(self.symbols)
+        if entity is BarCheck:
+            return iter(self.open_rows)
+        raise AssertionError(f"unexpected statement: {stmt}")
+
+    def commit(self):
+        self.commits += 1
+
+
+DAY, PREV_DAY = date(2026, 10, 1), date(2026, 9, 30)
+SYMBOLS = [(1, "AAA"), (2, "BBB"), (3, "CCC"), (4, "DDD")]
+TARGETS = {DAY: {(sid, tf) for sid in (1, 2, 3) for tf in ("1d", "1h")},
+           PREV_DAY: {(4, "1h")}}
+
+
+def _run_with_fakes(monkeypatch, prev, results, published=True, open_rows=(),
+                    targets=TARGETS):
+    """rs._run with the DB, network and calendar-dependent targets faked out:
+    only the transition bookkeeping is real. `open_rows` are the pending/fail
+    bar_checks rows the fake session returns; `targets=None` runs the real
+    select_targets over them instead of the fixed TARGETS. -> (summary,
+    session, upserts, patched symbol ids)."""
+    upserts, patches = [], []
+    session = _FakeRunSession(SYMBOLS, open_rows)
+    if targets is not None:
+        monkeypatch.setattr(rs, "select_targets", lambda *a, **k: targets)
+    monkeypatch.setattr(rs, "fetch_bhavcopy", lambda d: object() if published else None)
+    monkeypatch.setattr(rs, "_load_day_candles", lambda s, d, ids: {})
+    monkeypatch.setattr(rs, "_load_prev_checks", lambda s, d, ids: prev.get(d, {}))
+    monkeypatch.setattr(rs, "eq_row", lambda b, name: {"SctySrs": "EQ", "name": name})
+    monkeypatch.setattr(rs, "evaluate",
+                        lambda tf, bars, row, expected: results[(row["name"], tf)])
+    monkeypatch.setattr(rs, "_apply_patch", lambda s, sid, bars, patch: patches.append(sid))
+    monkeypatch.setattr(rs, "_upsert_check",
+                        lambda s, sid, d, tf, res: upserts.append(
+                            (sid, d, tf, res.status, res.note)))
+    return rs._run(session, DAY, None), session, upserts, patches
+
+
+def test_run_counts_resolved_rows_and_lists_changed_symbols(monkeypatch):
+    prev = {
+        DAY: {(1, "1d"): ("pending", rc.NOTE_NO_BHAV),   # resolved
+            (1, "1h"): ("pending", rc.NOTE_NO_BHAV),   # resolved
+            (2, "1d"): ("pass", None),                 # unchanged
+            (2, "1h"): ("pass", rc.NOTE_PATCHED),      # unchanged, note carried over
+            (3, "1d"): ("fail", "close +0.50"),        # still failing
+            (3, "1h"): ("pass", None)},                # freshly patched
+        PREV_DAY: {(4, "1h"): ("fail", "bars 6!=7")},    # resolved, an older day
+    }
+    results = {
+        ("AAA", "1d"): rc.CheckResult(rc.PASS), ("AAA", "1h"): rc.CheckResult(rc.PASS),
+        ("BBB", "1d"): rc.CheckResult(rc.PASS), ("BBB", "1h"): rc.CheckResult(rc.PASS),
+        ("CCC", "1d"): rc.CheckResult(rc.FAIL, "close +0.50"),
+        ("CCC", "1h"): rc.CheckResult(rc.PASS, rc.NOTE_PATCHED,
+                                      patch={"close": 1.0, "high": 1.0, "low": 1.0}),
+        ("DDD", "1h"): rc.CheckResult(rc.PASS),
+    }
+    summary, session, upserts, patches = _run_with_fakes(monkeypatch, prev, results)
+
+    assert summary["resolved"] == 3  # AAA 1d, AAA 1h, DDD 1h (a day older than `day`)
+    assert summary["changed_symbols"] == ["AAA", "CCC", "DDD"]  # sorted; BBB untouched
+    assert summary["patched"] == 1 and patches == [3]
+    assert (summary["pass"], summary["fail"], summary["pending"]) == (6, 1, 0)
+    assert summary["worst"] == [f"CCC 1d {DAY}: close +0.50"]
+    assert (2, DAY, "1h", "pass", rc.NOTE_PATCHED) in upserts  # earlier patch note kept
+    assert session.commits == 2  # one per day
+
+
+def test_run_steady_state_changes_nothing(monkeypatch):
+    prev = {DAY: {(sid, tf): ("pass", None) for sid in (1, 2, 3) for tf in ("1d", "1h")},
+            PREV_DAY: {(4, "1h"): ("pass", None)}}
+    results = {(name, tf): rc.CheckResult(rc.PASS)
+               for _, name in SYMBOLS for tf in ("1d", "1h")}
+    summary, _, _, patches = _run_with_fakes(monkeypatch, prev, results)
+    assert summary["resolved"] == 0 and summary["changed_symbols"] == []
+    assert summary["pass"] == 7 and patches == []
+
+
+def test_run_unpublished_bhavcopy_resolves_nothing(monkeypatch):
+    prev = {DAY: {(sid, tf): ("pending", rc.NOTE_NO_BHAV)
+                for sid in (1, 2, 3) for tf in ("1d", "1h")}}
+    summary, _, upserts, _ = _run_with_fakes(monkeypatch, prev, {}, published=False)
+    assert summary["pending"] == 7 and summary["pass"] == 0
+    assert summary["resolved"] == 0 and summary["changed_symbols"] == []
+    assert {u[3] for u in upserts} == {"pending"}
+
+
+def test_run_leaves_open_rows_after_the_checked_day_alone(monkeypatch):
+    """A catch-up run before the close checks the PREVIOUS session (DAY here).
+    Open rows an older run wrote for a later session -- the one that hasn't
+    closed -- are neither re-checked nor rewritten; older open rows still are."""
+    monkeypatch.setattr(rs.settings, "incremental_overlap_days", 0)
+    later = date(2026, 10, 5)  # the session after DAY (Fri 10-02 is a holiday)
+    older = date(2026, 9, 24)
+    open_rows = (
+        [(sid, later, tf, "pending") for sid in (1, 2, 3, 4) for tf in ("1d", "1h")]
+        + [(1, later, "1d", "fail")]
+        + [(4, older, "1h", "pending")]
+    )
+    results = {(name, tf): rc.CheckResult(rc.PASS)
+               for _, name in SYMBOLS for tf in ("1d", "1h")}
+    summary, session, upserts, _ = _run_with_fakes(
+        monkeypatch, {}, results, open_rows=open_rows, targets=None)
+
+    days = {u[1] for u in upserts}
+    assert later not in days and max(days) == DAY
+    # DAY and the previous session (ingest's re-fetch window), plus the older
+    # open row's day: every active symbol x 1d/1h on the first two, one key on it.
+    assert days == {older, PREV_DAY, DAY}
+    assert len(upserts) == 8 + 8 + 1
+    assert session.commits == 3
+    assert summary["day"] == str(DAY)
+    assert summary["pending"] == 0 and summary["pass"] == 17
+
+
+@pytest.mark.parametrize("now,expected_days", [
+    # The reported bug: a manual run at Wed 08:30 (daily_sync passes day=today
+    # on a trading day) used to treat Wed as the newest session, find no
+    # bhavcopy and write every symbol x 1d/1h 'pending' for it.
+    (ist_at(7, 8, 30), {date(2026, 10, 5), date(2026, 10, 6)}),
+    (ist_at(7, 0, 13), {date(2026, 10, 5), date(2026, 10, 6)}),
+    # After the close the same call legitimately checks (and, bhavcopy not out
+    # yet, marks pending) today: the evening run is unchanged.
+    (ist_at(7, 19, 0), {date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)}),
+])
+def test_run_reconcile_never_writes_rows_for_a_session_that_has_not_closed(
+        monkeypatch, now, expected_days):
+    monkeypatch.setattr(rs.settings, "incremental_overlap_days", 2)
+    monkeypatch.setattr(rs, "now_ist", lambda: now)
+    monkeypatch.setattr(rs, "fetch_bhavcopy", lambda d: None)  # nothing published
+    upserts = []
+    monkeypatch.setattr(rs, "_upsert_check",
+                        lambda s, sid, d, tf, res: upserts.append((sid, d, tf, res.status)))
+    session = _FakeRunSession(SYMBOLS)
+
+    summary = rs.run_reconcile(date(2026, 10, 7), session=session)
+
+    assert {u[1] for u in upserts} == expected_days
+    assert summary["day"] == str(max(expected_days))
+    assert {u[3] for u in upserts} == {"pending"}
+    assert len(upserts) == len(expected_days) * len(SYMBOLS) * 2  # every symbol x 1d/1h
+
+
+def test_run_keeps_open_rows_up_to_and_including_the_checked_day(monkeypatch):
+    monkeypatch.setattr(rs.settings, "incremental_overlap_days", 0)
+    open_rows = [(4, DAY, "1d", "pending"), (4, date(2026, 9, 24), "1d", "fail")]
+    prev = {DAY: {(4, "1d"): ("pending", rc.NOTE_NO_BHAV)},
+            date(2026, 9, 24): {(4, "1d"): ("fail", "close +0.50")}}
+    results = {(name, tf): rc.CheckResult(rc.PASS)
+               for _, name in SYMBOLS for tf in ("1d", "1h")}
+    summary, _, upserts, _ = _run_with_fakes(
+        monkeypatch, prev, results, open_rows=open_rows, targets=None)
+    assert (4, date(2026, 9, 24), "1d", "pass", None) in upserts
+    assert summary["resolved"] == 2  # the pending row on DAY and the old fail row
+    assert summary["changed_symbols"] == ["DDD"]
+
+
 # --- scheduler recheck wiring ----------------------------------------------
 
 class _FakeSession:
@@ -330,44 +651,94 @@ def sched(monkeypatch):
                         lambda c, k: date.fromisoformat(c[k]) if c.get(k) else None)
     monkeypatch.setattr(settings_store, "set_last_run",
                         lambda s, k, d: marks.append((k, d)))
+    # Guards: the real reconcile needs the DB and the real daily_sync writes to
+    # it, so a test that forgets to fake them fails instead of touching it.
+    monkeypatch.setattr(rs, "run_reconcile",
+                        lambda *a, **k: pytest.fail("real run_reconcile called"))
+    monkeypatch.setattr(daily_sync, "main",
+                        lambda argv=None: pytest.fail("real daily_sync.main called"))
     return marks
 
 
-def test_recheck_is_built():
-    assert scheduler_tick.RECHECK_BUILT is True
+def _summary(changed, **kw):
+    s = {"day": "2026-10-01", "pass": 998, "fail": 2, "pending": 0, "patched": 1,
+         "resolved": len(changed), "changed_symbols": list(changed), "worst": []}
+    s.update(kw)
+    return s
 
 
-def test_recheck_due_runs_reconcile_and_signals_and_records(monkeypatch, sched):
-    monkeypatch.setattr(settings, "price_source", "fyers")
-    calls = []
-    monkeypatch.setattr(daily_sync, "main", lambda argv=None: calls.append(argv) or 0)
+def _fake_reconcile(summary, calls):
+    def run_reconcile(*args, **kwargs):
+        calls.append((args, kwargs))
+        return summary
+    return run_reconcile
+
+
+def test_run_recheck_regenerates_signals_only_for_changed_symbols(monkeypatch):
+    rcalls, dcalls = [], []
+    monkeypatch.setattr(rs, "run_reconcile",
+                        _fake_reconcile(_summary(["ABB", "M&M", "TCS"]), rcalls))
+    monkeypatch.setattr(daily_sync, "main", lambda argv=None: dcalls.append(argv) or 1)
+
+    assert scheduler_tick.run_recheck() == 1  # daily_sync's exit code comes back
+    assert rcalls == [((), {})]  # default day, every active symbol
+    assert dcalls == [["--steps", "signals", "--symbols", "ABB,M&M,TCS"]]
+    # ... and that argv is one daily_sync's own parser understands.
+    args = daily_sync.build_parser().parse_args(dcalls[0])
+    assert daily_sync.parse_steps(args.steps) == ["signals"]
+    assert daily_sync._parse_symbols(args.symbols) == ["ABB", "M&M", "TCS"]
+
+
+def test_run_recheck_nothing_changed_skips_signals(monkeypatch, caplog):
+    rcalls = []
+    monkeypatch.setattr(rs, "run_reconcile", _fake_reconcile(_summary([]), rcalls))
+    monkeypatch.setattr(daily_sync, "main",
+                        lambda argv=None: pytest.fail("signals regenerated"))
+    with caplog.at_level(logging.INFO, logger="scheduler_tick"):
+        assert scheduler_tick.run_recheck() == 0
+    assert len(rcalls) == 1
+    assert "recheck: nothing changed, signals not regenerated" in caplog.text
+
+
+def test_recheck_due_regenerates_signals_for_changed_and_records(monkeypatch, sched):
+    dcalls = []
+    monkeypatch.setattr(rs, "run_reconcile", _fake_reconcile(_summary(["AAA", "BBB"]), []))
+    monkeypatch.setattr(daily_sync, "main", lambda argv=None: dcalls.append(argv) or 0)
     scheduler_tick.tick()
-    assert calls == [["--steps", "reconcile,signals"]]
+    assert dcalls == [["--steps", "signals", "--symbols", "AAA,BBB"]]
     assert sched == [("recheck_last_run", date(2026, 10, 1))]
 
 
-def test_recheck_records_last_run_even_when_it_raises(monkeypatch, sched):
-    monkeypatch.setattr(settings, "price_source", "fyers")
+def test_recheck_due_nothing_changed_still_records_last_run(monkeypatch, sched):
+    monkeypatch.setattr(rs, "run_reconcile", _fake_reconcile(_summary([]), []))
+    monkeypatch.setattr(daily_sync, "main",
+                        lambda argv=None: pytest.fail("signals regenerated"))
+    scheduler_tick.tick()
+    assert sched == [("recheck_last_run", date(2026, 10, 1))]
+
+
+def test_recheck_records_last_run_even_when_signals_raise(monkeypatch, sched):
 
     def boom(argv=None):
         raise RuntimeError("x")
+    monkeypatch.setattr(rs, "run_reconcile", _fake_reconcile(_summary(["AAA"]), []))
     monkeypatch.setattr(daily_sync, "main", boom)
     scheduler_tick.tick()
     assert sched == [("recheck_last_run", date(2026, 10, 1))]
 
 
-def test_recheck_dry_run_runs_nothing(monkeypatch, sched):
-    monkeypatch.setattr(settings, "price_source", "fyers")
-    monkeypatch.setattr(daily_sync, "main", lambda argv=None: pytest.fail("ran"))
-    scheduler_tick.tick(dry_run=True)
-    assert sched == []
+def test_recheck_records_last_run_even_when_reconcile_raises(monkeypatch, sched):
 
-
-def test_recheck_is_a_noop_on_yfinance_but_still_recorded(monkeypatch, sched):
-    monkeypatch.setattr(settings, "price_source", "yfinance")
-    monkeypatch.setattr(daily_sync, "main", lambda argv=None: pytest.fail("ran"))
-    scheduler_tick.tick()
+    def boom(*args, **kwargs):
+        raise RuntimeError("x")
+    monkeypatch.setattr(rs, "run_reconcile", boom)
+    scheduler_tick.tick()  # daily_sync.main stays guarded: signals must not run
     assert sched == [("recheck_last_run", date(2026, 10, 1))]
+
+
+def test_recheck_dry_run_runs_nothing(monkeypatch, sched):
+    scheduler_tick.tick(dry_run=True)  # both guards would fail the test if hit
+    assert sched == []
 
 
 # --- 4h follows the 1h patch ---------------------------------------------

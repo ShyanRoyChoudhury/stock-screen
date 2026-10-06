@@ -161,15 +161,13 @@ def _step_ingest(day: date, symbols: list[str] | None, timeframes: list[str]) ->
 
 
 def _step_reconcile(day: date, symbols: list[str] | None, timeframes: list[str]) -> dict:
-    """Bhavcopy check of the newest session (no-op unless PRICE_SOURCE=fyers).
+    """Bhavcopy check of the newest session.
     Failed/pending days are a warning, not a failure: they hold that symbol's
     signals (see app.signals.service) but never stop the pipeline."""
     result = run_reconcile(day, symbols)
-    if result["skipped"]:
-        return {"step": "reconcile", "status": "ok", "message": result["message"],
-                "detail": result}
-    message = (f"{result['pass']} pass, {result['fail']} fail, "
-               f"{result['pending']} pending, {result['patched']} close-patched")
+    message = (f"checked {result['day']}: {result['pass']} pass, "
+               f"{result['fail']} fail, {result['pending']} pending, "
+               f"{result['patched']} close-patched")
     status = "warning" if result["fail"] or result["pending"] else "ok"
     return {"step": "reconcile", "status": status, "message": message,
             "detail": result}

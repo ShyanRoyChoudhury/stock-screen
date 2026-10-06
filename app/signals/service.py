@@ -7,6 +7,7 @@ revisions can therefore never leave stale signals behind.
 
 import logging
 import math
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.indicators.service import load_candles
 from app.ingest import reconcile
-from app.market_calendar import last_trading_day, now_ist, shift_sessions
+from app.market_calendar import last_closed_session, now_ist, shift_sessions
 from app.models import TIMEFRAMES, BarCheck, IngestRun, Signal, Symbol
 from app.signals.core import STRATEGY_FUNCS
 
@@ -60,20 +61,28 @@ def signal_to_row(sig: dict, symbol_id: int, timeframe: str) -> dict:
     }
 
 
+def held_window(now: datetime | None = None) -> tuple[date, date]:
+    """(cutoff, anchor): the bar_checks days that can hold signals. The anchor
+    is the newest session that has CLOSED, not today -- a session still ahead
+    has no bhavcopy to check against, so it never holds anything; the cutoff is
+    `signal_check_lookback_sessions` sessions back from it (anchor included)."""
+    anchor = last_closed_session(now)
+    cutoff = shift_sessions(anchor, -(settings.signal_check_lookback_sessions - 1))
+    return cutoff, anchor
+
+
 def load_held(session) -> set[tuple[int, str]]:
     """{(symbol_id, check_timeframe)} with a fail/pending bar_checks row in
-    the last `signal_check_lookback_sessions` sessions. One query per run,
-    served by ix_bar_checks_status_day. Empty unless price_source is fyers."""
-    if not reconcile.reconcile_active(settings.price_source):
-        return set()
-    cutoff = shift_sessions(last_trading_day(),
-                            -(settings.signal_check_lookback_sessions - 1))
+    the last `signal_check_lookback_sessions` sessions up to the newest closed
+    one (see held_window). One query per run, served by
+    ix_bar_checks_status_day."""
+    cutoff, anchor = held_window()
     rows = session.execute(
         select(BarCheck.symbol_id, BarCheck.timeframe, BarCheck.day, BarCheck.status)
         .where(BarCheck.status.in_((reconcile.FAIL, reconcile.PENDING)),
-               BarCheck.day >= cutoff)
+               BarCheck.day >= cutoff, BarCheck.day <= anchor)
     ).all()
-    return reconcile.held_pairs(rows, cutoff)
+    return reconcile.held_pairs(rows, cutoff, latest_day=anchor)
 
 
 def run_signals(run_id: int, timeframes: list[str] | None,

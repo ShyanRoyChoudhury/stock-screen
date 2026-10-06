@@ -7,7 +7,6 @@ re-runs and source revisions are safe.
 
 import logging
 import re
-import time
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -17,13 +16,12 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
-from app.ingest.fetcher import fetch_ohlcv
-from app.ingest.fyers_fetcher import FyersFetcher
+from app.ingest.fyers_fetcher import FyersFetchError, FyersFetcher
 from app.ingest.fyers_session import FyersLoginRequired
 from app.ingest.resample import resample_1h_to_4h
 from app.market_calendar import IST, is_trading_day, now_ist
 from app.models import (
-    PRICE_BASIS_DEFAULT, BarCheck, Candle, IndicatorValue, IngestRun, Symbol,
+    BarCheck, Candle, IndicatorValue, IngestRun, Symbol,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +38,7 @@ MESSAGE_MAX = 512
 
 
 def period_to_start(period: str, today: date) -> date:
-    """Turn a yfinance-style period ("5y", "6mo", "730d") into a start date."""
+    """Turn a period string ("5y", "6mo", "730d") into a start date."""
     m = re.fullmatch(r"\s*(\d+)\s*(y|mo|d)\s*", period.lower())
     if not m:
         raise ValueError(f"unsupported period {period!r}; use e.g. 5y, 6mo, 730d")
@@ -103,14 +101,14 @@ def upsert_candles(
     symbol_id: int,
     timeframe: str,
     df: pd.DataFrame,
-    source: str = "yfinance",
-    price_basis: str = PRICE_BASIS_DEFAULT,
+    source: str = FYERS_SOURCE,
+    price_basis: str = FYERS_BASIS,
 ) -> int:
     """Upsert candles for one (symbol, timeframe).
 
     `source` and `price_basis` are stored per row so a series can be audited:
     prices from different providers, or on different adjustment conventions,
-    are not interchangeable (see fetch_ohlcv). Both are in the ON CONFLICT set,
+    are not interchangeable. Both are in the ON CONFLICT set,
     so a re-ingest on a new basis restamps the rows it rewrites — leaving any
     rows it did NOT reach still showing the old basis, which is exactly the
     signal that a partial re-ingest happened."""
@@ -219,6 +217,32 @@ def _wipe_symbol(session: Session, symbol_id: int) -> None:
     session.execute(delete(BarCheck).where(BarCheck.symbol_id == symbol_id))
 
 
+def rebuild_symbol_history(
+    session: Session, sym: Symbol, fetcher: FyersFetcher, today: date,
+) -> int:
+    """Replace a symbol's whole stored history with a fresh Fyers download:
+    full daily (daily_backfill_period) and hourly (hourly_backfill_days), 4h
+    built from hourly. Everything is fetched BEFORE anything is wiped, so a
+    fetch failure leaves the old data intact. The caller commits (and rolls
+    back on error). Returns candles written."""
+    daily_start = period_to_start(settings.daily_backfill_period, today)
+    hourly_start = today - timedelta(days=settings.hourly_backfill_days)
+    full_daily = round_volume(fetcher.fetch_bars(sym.symbol, "1d", daily_start))
+    full_hourly = round_volume(fetcher.fetch_bars(sym.symbol, "60m", hourly_start))
+    # An empty answer (renamed/delisted symbol, Fyers outage) must not wipe
+    # the stored history and replace it with nothing.
+    if full_daily.empty or full_hourly.empty:
+        raise FyersFetchError(
+            f"Fyers returned no {'daily' if full_daily.empty else 'hourly'} "
+            f"bars for {sym.symbol}; stored history left untouched")
+    full_daily.index = full_daily.index.normalize() + SESSION_OPEN_OFFSET
+    _wipe_symbol(session, sym.id)
+    wrote = _write_fyers(session, sym.id, full_hourly, True, True)
+    wrote += upsert_candles(session, sym.id, "1d", full_daily,
+                            FYERS_SOURCE, FYERS_BASIS)
+    return wrote
+
+
 def _ingest_symbol_fyers(
     session: Session,
     sym: Symbol,
@@ -249,17 +273,7 @@ def _ingest_symbol_fyers(
                     "from a fresh fetch; re-downloading full history",
                     sym.symbol, max_diff,
                 )
-                # Fetch everything first so a fetch failure leaves the old
-                # data intact; then wipe + insert in one transaction.
-                full_daily = round_volume(
-                    fetcher.fetch_bars(sym.symbol, "1d", daily_full_start))
-                full_hourly = round_volume(
-                    fetcher.fetch_bars(sym.symbol, "60m", hourly_full_start))
-                full_daily.index = full_daily.index.normalize() + SESSION_OPEN_OFFSET
-                _wipe_symbol(session, sym.id)
-                wrote = _write_fyers(session, sym.id, full_hourly, True, True)
-                wrote += upsert_candles(session, sym.id, "1d", full_daily,
-                                        FYERS_SOURCE, FYERS_BASIS)
+                wrote = rebuild_symbol_history(session, sym, fetcher, today)
                 return wrote, max_diff
 
     wrote = 0
@@ -303,93 +317,38 @@ def run_ingest(
             logger.info("Not a trading day (%s); incremental run continues "
                         "to catch any missed prior session.", today)
 
-        want_1h = "1h" in timeframes
-        want_4h = "4h" in timeframes
-        want_1d = "1d" in timeframes
-        need_hourly = want_1h or want_4h
-
         syms = _resolve_symbols(session, symbols)
         run.symbols_total = len(syms)
         session.commit()
 
-        use_fyers = settings.price_source == "fyers"
-        fetcher = None
         redownloaded: list[str] = []
         login_lost = False
-        if use_fyers:
-            try:
-                fetcher = FyersFetcher.from_session(session)
-            except FyersLoginRequired:
-                logger.warning("Fyers login needed; ingest run %s not started", run_id)
-                run.status = "failed"
-                run.message = "Fyers login needed"
-                return
+        try:
+            fetcher = FyersFetcher.from_session(session)
+        except FyersLoginRequired:
+            logger.warning("Fyers login needed; ingest run %s not started", run_id)
+            run.status = "failed"
+            run.message = "Fyers login needed"
+            return
 
         for sym in syms:
-            wrote = 0
-            if use_fyers:
-                try:
-                    wrote, redo_diff = _ingest_symbol_fyers(
-                        session, sym, fetcher, mode, timeframes, today)
-                    if redo_diff is not None:
-                        redownloaded.append(sym.symbol)
-                    run.symbols_ok += 1
-                    run.candles_written += wrote
-                except FyersLoginRequired:
-                    session.rollback()
-                    login_lost = True
-                    break
-                except Exception as e:
-                    session.rollback()
-                    logger.exception("Ingest failed for %s", sym.symbol)
-                    run.symbols_failed += 1
-                    run.errors = run.errors + [{"symbol": sym.symbol, "error": str(e)}]
-                session.commit()
-                continue
             try:
-                if need_hourly:
-                    start = (
-                        _incremental_start(session, sym.id, "1h")
-                        if mode == "incremental"
-                        else None
-                    )
-                    if start is None:
-                        start = (
-                            now_ist().date()
-                            - timedelta(days=settings.hourly_backfill_days)
-                        )
-                    hourly = fetch_ohlcv(sym.symbol, "60m", start=start)
-                    if want_1h:
-                        wrote += upsert_candles(session, sym.id, "1h", hourly)
-                    if want_4h:
-                        four_h = resample_1h_to_4h(hourly)
-                        wrote += upsert_candles(session, sym.id, "4h", four_h)
-
-                if want_1d:
-                    start = (
-                        _incremental_start(session, sym.id, "1d")
-                        if mode == "incremental"
-                        else None
-                    )
-                    daily = fetch_ohlcv(
-                        sym.symbol,
-                        "1d",
-                        period=None if start else settings.daily_backfill_period,
-                        start=start,
-                    )
-                    # Daily candle ts = session open (09:15 IST), matching the
-                    # "ts is candle start" convention of the other timeframes.
-                    daily.index = daily.index.normalize() + SESSION_OPEN_OFFSET
-                    wrote += upsert_candles(session, sym.id, "1d", daily)
-
+                wrote, redo_diff = _ingest_symbol_fyers(
+                    session, sym, fetcher, mode, timeframes, today)
+                if redo_diff is not None:
+                    redownloaded.append(sym.symbol)
                 run.symbols_ok += 1
                 run.candles_written += wrote
+            except FyersLoginRequired:
+                session.rollback()
+                login_lost = True
+                break
             except Exception as e:
+                session.rollback()
                 logger.exception("Ingest failed for %s", sym.symbol)
                 run.symbols_failed += 1
                 run.errors = run.errors + [{"symbol": sym.symbol, "error": str(e)}]
             session.commit()
-            time.sleep(settings.fetch_delay_seconds)
 
         done = f"{run.symbols_ok}/{run.symbols_total} symbols ok, " \
                f"{run.candles_written} candles written"

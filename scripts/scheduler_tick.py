@@ -3,8 +3,10 @@
 Reads the admin job settings (app_settings) and, when due, runs:
   - the daily job (scripts/daily_sync.py, all steps, in-process) at
     `daily_job_time` IST on a trading day, once per day;
-  - the bhavcopy re-check at `recheck_time` IST (daily_sync --steps
-    reconcile,signals), once per day; picks up a late-published bhavcopy.
+  - the bhavcopy re-check at `recheck_time` IST, once per day: runs the
+    reconcile and regenerates signals only for the symbols it changed (a
+    late-published bhavcopy resolving pending/failed rows, or a close patch);
+    nothing changed, nothing regenerated.
 
 A Postgres advisory lock makes overlapping ticks (a long daily job still
 running when the next cron fires) exit immediately.
@@ -30,7 +32,6 @@ logging.basicConfig(
 logger = logging.getLogger("scheduler_tick")
 
 LOCK_KEY = 7_204_001  # arbitrary app-wide advisory lock id
-RECHECK_BUILT = True
 
 
 def is_due(
@@ -57,17 +58,22 @@ def run_daily_job() -> int:
 
 
 def run_recheck() -> int:
-    """Re-run reconcile (resolves pending/failed days once the bhavcopy is
-    out or ingest re-fetched good bars) then signals. A no-op unless
-    PRICE_SOURCE=fyers: on yfinance there is nothing to reconcile and the
-    daily job's signals are already current."""
-    from app.config import settings
+    """Re-run the reconcile (resolves pending/failed days once the bhavcopy is
+    out or ingest re-fetched good bars), then regenerate signals ONLY for the
+    symbols it changed: a pending/fail row that now passes (its signal hold
+    lifts) or a last-close patch. Returns daily_sync's exit code when signals
+    ran, else 0."""
+    from app.ingest.reconcile_service import run_reconcile
     from scripts import daily_sync
 
-    if settings.price_source != "fyers":
-        logger.info("recheck skipped: price_source is %s", settings.price_source)
+    summary = run_reconcile()  # default day, all active symbols
+    logger.info("recheck: reconcile summary %s", summary)
+    changed = summary["changed_symbols"]
+    if not changed:
+        logger.info("recheck: nothing changed, signals not regenerated")
         return 0
-    return daily_sync.main(["--steps", "reconcile,signals"])
+    logger.info("recheck: regenerating signals for %d symbol(s)", len(changed))
+    return daily_sync.main(["--steps", "signals", "--symbols", ",".join(changed)])
 
 
 def tick(dry_run: bool = False) -> None:
@@ -97,9 +103,6 @@ def tick(dry_run: bool = False) -> None:
 
     if is_due(now, cfg["recheck_time"], settings_store.get_date(cfg, "recheck_last_run"),
               trading, bool(cfg["daily_job_enabled"])):
-        if not RECHECK_BUILT:
-            logger.info("recheck not built; skipped")
-            return
         logger.info("recheck due (%s IST)", cfg["recheck_time"])
         if dry_run:
             return

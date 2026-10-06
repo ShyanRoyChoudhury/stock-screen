@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from app.config import Settings, settings
+from app.config import settings
 from app.indicators.adjust import adjustment_series, volume_factor_series
 from app.ingest import service
 from app.ingest.fyers_session import FyersLoginRequired
@@ -91,13 +91,6 @@ def test_round_volume_rounds_not_truncates():
     assert out["volume"].dtype == "int64"
 
 
-def test_price_source_validation():
-    assert Settings(price_source="Fyers").price_source == "fyers"
-    with pytest.raises(ValueError):
-        Settings(price_source="nse")
-    assert Settings().price_source in ("yfinance", "fyers")
-
-
 def test_adjust_accepts_fyers_basis():
     closes = pd.Series([1.0, 2.0], index=pd.date_range("2026-01-01", periods=2))
     acts = pd.DataFrame({"action_type": ["dividend"], "ex_date": [date(2026, 1, 2)],
@@ -132,7 +125,7 @@ def hourly_df():
 def rec(monkeypatch):
     r = SimpleNamespace(upserts=[], wiped=[])
     monkeypatch.setattr(service, "upsert_candles",
-        lambda s, sid, tf, df, source="yfinance", price_basis="x":
+        lambda s, sid, tf, df, source="fyers", price_basis="x":
         r.upserts.append((tf, source, price_basis, df.copy())) or len(df))
     monkeypatch.setattr(service, "_wipe_symbol", lambda s, sid: r.wiped.append(sid))
     monkeypatch.setattr(service, "_incremental_start",
@@ -222,8 +215,6 @@ def setup_run(monkeypatch, source, syms, ingest_fn=None, fetcher=None):
     sess = FakeSession(run)
     monkeypatch.setattr(service, "SessionLocal", lambda: sess)
     monkeypatch.setattr(service, "_resolve_symbols", lambda s, r: syms)
-    monkeypatch.setattr(service.settings, "price_source", source)
-    monkeypatch.setattr(service.time, "sleep", lambda s: pytest.fail("slept"))
     if ingest_fn:
         monkeypatch.setattr(service, "_ingest_symbol_fyers", ingest_fn)
     if fetcher is not None:
@@ -271,27 +262,6 @@ def test_run_ingest_symbol_error_continues(monkeypatch):
     run = setup_run(monkeypatch, "fyers", syms, fake, fetcher=object())
     service.run_ingest(1, "incremental", ["1d"], None)
     assert run.status == "completed" and run.symbols_failed == 1 and run.symbols_ok == 1
-
-
-def test_yfinance_path_unchanged(monkeypatch):
-    syms = [SimpleNamespace(id=1, symbol="A")]
-    run = setup_run(monkeypatch, "yfinance", syms,
-                    ingest_fn=lambda *a: pytest.fail("fyers path used"))
-    monkeypatch.setattr(service.time, "sleep", lambda s: None)  # yfinance still sleeps
-    calls = []
-
-    def fake_fetch(sym, interval, period=None, start=None):
-        calls.append((sym, interval))
-        df = daily(BASE)
-        return df if interval == "1d" else hourly_df()
-    monkeypatch.setattr(service, "fetch_ohlcv", fake_fetch)
-    seen = []
-    monkeypatch.setattr(service, "upsert_candles",
-        lambda s, sid, tf, df, *a, **k: seen.append((tf, a, k)) or len(df))
-    monkeypatch.setattr(service, "_incremental_start", lambda *a: None)
-    service.run_ingest(1, "backfill", ["1d"], None)
-    assert calls == [("A", "1d")] and run.status == "completed"
-    assert seen == [("1d", (), {})]  # default source/basis: not stamped fyers
 
 
 def test_wipe_symbol_deletes_bar_checks_too():

@@ -1,4 +1,4 @@
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,19 +8,12 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://stockscreen:stockscreen@localhost:5433/stockscreen"
     )
-    # Yahoo caps hourly history at 730 days. Sent as an explicit start date,
-    # not period="730d": Yahoo resolves the period form to the listing date
-    # for recently listed symbols and then rejects the request outright.
-    # 728 keeps a safety margin from the boundary.
+    # Days of 1h history to request, sent as an explicit start date.
     hourly_backfill_days: int = 728
     daily_backfill_period: str = "5y"
-    fetch_delay_seconds: float = 0.5
     # Incremental runs re-fetch this many days before the last stored candle;
-    # the upsert dedupes and picks up any revisions Yahoo published.
+    # the upsert dedupes and picks up any revisions Fyers published.
     incremental_overlap_days: int = 2
-    # Market-data provider for ingestion: "yfinance" (legacy) or "fyers".
-    # Stays "yfinance" until the cutover so rows from the two are never mixed.
-    price_source: str = "yfinance"
     # Fernet key encrypting broker_accounts.credentials_enc / access_token_enc.
     # Unset until a deployment generates one; app.brokers.crypto raises on use.
     broker_master_key: SecretStr | None = None
@@ -37,7 +30,7 @@ class Settings(BaseSettings):
     fyers_request_timeout: int = 30
     # How many trading sessions after a fill to search for a matching signal.
     match_window_sessions: int = 5
-    # With price_source=fyers: a symbol with a failed/pending bar_checks row in
+    # A symbol with a failed/pending bar_checks row in
     # the last N sessions gets no new signals (previous ones are kept).
     signal_check_lookback_sessions: int = 20
     # Max % gap between a signal's entry and the fill price to still match.
@@ -48,14 +41,6 @@ class Settings(BaseSettings):
     swing_review_after_sessions: int = 30
     # Sessions ahead of an upcoming corporate action to start warning on it.
     upcoming_action_warn_sessions: int = 5
-
-    @field_validator("price_source")
-    @classmethod
-    def _check_price_source(cls, v: str) -> str:
-        v = v.strip().lower()
-        if v not in ("yfinance", "fyers"):
-            raise ValueError(f"price_source must be 'yfinance' or 'fyers', got {v!r}")
-        return v
 
 
 settings = Settings()

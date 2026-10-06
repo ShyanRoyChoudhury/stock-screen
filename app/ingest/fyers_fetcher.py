@@ -1,6 +1,6 @@
 """OHLCV fetch from Fyers' /data/history endpoint (plain `requests`).
 
-Output matches app.ingest.fetcher.fetch_ohlcv: tz-aware IST DatetimeIndex,
+Output: tz-aware IST DatetimeIndex,
 columns open/high/low/close/volume, empty frame (empty IST DatetimeIndex) when
 there is no data. Daily bars are stamped at midnight IST, so the service's
 `index.normalize() + SESSION_OPEN_OFFSET` still yields 09:15.
@@ -25,9 +25,8 @@ import requests
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.ingest.fetcher import drop_incomplete_candles
 from app.ingest.fyers_session import FyersLoginRequired, get_token
-from app.market_calendar import IST, now_ist
+from app.market_calendar import IST, now_ist, session_close_dt
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +178,27 @@ class FyersFetcher:
                 })
                 rows.extend(body.get("candles") or [])
         return _candles_to_df(rows, interval)
+
+
+def drop_incomplete_candles(df: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """Remove the still-forming candle so we never store a shape that can change.
+
+    A candle is complete once its end time has passed:
+    - 60m: start + 1h, capped at that day's 15:30 session close
+      (the 15:15 candle is only 15 minutes long);
+    - 1d: 15:30 IST on the candle's date.
+    """
+    if df.empty:
+        return df
+    now = now_ist()
+    last = df.index[-1]
+    if interval == "60m":
+        end = min(last + timedelta(hours=1), session_close_dt(last.date()))
+    else:  # 1d
+        end = session_close_dt(last.date())
+    if end > now:
+        df = df.iloc[:-1]
+    return df
 
 
 def _candles_to_df(rows: list[list], interval: str) -> pd.DataFrame:

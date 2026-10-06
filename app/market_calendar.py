@@ -51,6 +51,32 @@ def now_ist() -> datetime:
     return datetime.now(IST)
 
 
+def last_closed_session(now: datetime | None = None) -> date:
+    """The most recent trading session whose close (15:30 IST) is at or before
+    `now` (default: now, IST). A tz-aware `now` in any zone is converted to IST.
+
+    Why: anything that verifies a COMPLETED session (the bhavcopy reconcile)
+    must never target one that hasn't closed. last_trading_day answers "is
+    there a session today?", so it returns today even at 08:30 or 00:13 --
+    before that session has opened, let alone published a bhavcopy. This
+    returns the previous session until today's close: today after 15:30 on a
+    trading day, the previous session before it, and on a weekend/holiday the
+    last session before it."""
+    if now is None:
+        now = now_ist()
+    elif now.tzinfo is None:
+        # astimezone() would silently read a naive value as the machine's
+        # local zone, which is not IST on every host (a container is often UTC).
+        raise ValueError("now must be timezone-aware")
+    now = now.astimezone(IST)
+    today = now.date()
+    if not is_trading_day(today):
+        return last_trading_day(today)
+    if now >= session_close_dt(today):
+        return today
+    return last_trading_day(today - timedelta(days=1))
+
+
 def sessions_between(start: date, end: date) -> int:
     """Trading sessions strictly after `start`, up to and including `end`.
     0 when end <= start. Holding periods and match windows count sessions,

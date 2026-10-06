@@ -28,12 +28,10 @@ All settings, in `app/config.py` order:
 | `.env` key | Settings field | Default | Meaning |
 |---|---|---|---|
 | `DATABASE_URL` | `database_url` | `postgresql+psycopg://stockscreen:stockscreen@localhost:5433/stockscreen` | SQLAlchemy URL; matches `docker-compose.yml` |
-| `HOURLY_BACKFILL_DAYS` | `hourly_backfill_days` | `728` | Days of 1h history to request. Sent as an explicit start date, not `period="730d"` — Yahoo resolves the period form to the listing date for recently-listed symbols and rejects it; 728 keeps margin under Yahoo's 730-day hourly cap |
-| `DAILY_BACKFILL_PERIOD` | `daily_backfill_period` | `"5y"` | yfinance `period=` for daily backfill |
-| `FETCH_DELAY_SECONDS` | `fetch_delay_seconds` | `0.5` | Sleep between per-symbol Yahoo fetches |
-| `INCREMENTAL_OVERLAP_DAYS` | `incremental_overlap_days` | `2` | An incremental ingest re-fetches this many days before the last stored candle; the upsert dedupes and also picks up any Yahoo revisions |
-| `PRICE_SOURCE` | `price_source` | `yfinance` | Market-data provider: `yfinance` (legacy) or `fyers`. The bhavcopy reconcile step and signal holds (section 4, "Bhavcopy reconcile") are active **only** when this is `fyers` |
-| `SIGNAL_CHECK_LOOKBACK_SESSIONS` | `signal_check_lookback_sessions` | `20` | With `PRICE_SOURCE=fyers`: a symbol with a `fail`/`pending` `bar_checks` row in the last N sessions gets no new signals (its previous signals are kept) |
+| `HOURLY_BACKFILL_DAYS` | `hourly_backfill_days` | `728` | Days of 1h history to request (a full Fyers hourly download starts this many days back; Fyers' hourly history begins July 2017) |
+| `DAILY_BACKFILL_PERIOD` | `daily_backfill_period` | `"5y"` | Length of a full Fyers daily download (`5y`, `6mo`, `730d`) |
+| `INCREMENTAL_OVERLAP_DAYS` | `incremental_overlap_days` | `2` | An incremental ingest re-fetches this many days before the last stored candle; the upsert dedupes and also picks up any Fyers revisions |
+| `SIGNAL_CHECK_LOOKBACK_SESSIONS` | `signal_check_lookback_sessions` | `20` | A symbol with a `fail`/`pending` `bar_checks` row in the last N sessions gets no new signals (its previous signals are kept) |
 | `BROKER_MASTER_KEY` | `broker_master_key` | unset (`None`) | Fernet key encrypting `broker_accounts.credentials_enc` / `access_token_enc`. Unset until generated; `app.brokers.crypto` raises `MasterKeyMissing` on first use |
 | `GROWW_REQUEST_TIMEOUT` | `groww_request_timeout` | `30` | Timeout (seconds) for outbound Groww API calls |
 | `FYERS_CLIENT_ID` | `fyers_client_id` | `""` | Fyers API app id, e.g. `XXXX-100` |
@@ -194,19 +192,23 @@ WHERE s.symbol = 'RELIANCE'
 ORDER BY ca.ex_date DESC;
 ```
 
-`price_basis` distribution (should be entirely `splits_only` — see
-`app/models.py`'s `PRICE_BASES`):
+`price_basis` distribution (should be entirely `fyers_adjusted` once the Fyers
+cutover has run — see `app/models.py`'s `PRICE_BASES`; `splits_only` rows are
+the old yfinance data):
 
 ```sql
 SELECT price_basis, count(*) FROM candles GROUP BY price_basis ORDER BY 1;
 ```
 
-Live output: `splits_only | 2682081` (only basis in use).
+Output before the cutover: `splits_only | 2682081` (only basis in use).
 
 ### Alembic
 
-Baseline revision (current head, `down_revision = None`): **`9d5140c06546`**
-— *"baseline: full schema as of broker/positions phase 1"*.
+Baseline revision (`down_revision = None`): **`9d5140c06546`** —
+*"baseline: full schema as of broker/positions phase 1"*. Current head:
+**`c85fe6dc94cf`** (`9d5140c06546` → `b7c1e4a92f10` data_feed_sessions +
+app_settings → `c3d8f1a5e602` bar_checks → `c85fe6dc94cf` candles.price_basis
+default `fyers_adjusted`). `.venv/bin/alembic heads` is the source of truth.
 
 | Command | When to use |
 |---|---|
@@ -303,7 +305,7 @@ Two smoke-run forms:
 |---|---|---|---|
 | 1 | `reap` | Fails any `IngestRun` stuck `status="running"` for 6h+ (dead process) — see `scripts/reap_stale_runs.py` | no (always `ok`) |
 | 2 | `ingest` | Incremental candle pull (`app.ingest.service.run_ingest`) | no — the rest of the pipeline still runs on yesterday's candles, marked `degraded` in the summary |
-| 2b | `reconcile` | Nightly NSE bhavcopy check of the newest session (`app.ingest.reconcile_service.run_reconcile`); a logged no-op unless `PRICE_SOURCE=fyers`. See "Bhavcopy reconcile" below | no — `fail`/`pending` days are a `warning` |
+| 2b | `reconcile` | Nightly NSE bhavcopy check of the newest session (`app.ingest.reconcile_service.run_reconcile`); See "Bhavcopy reconcile" below | no — `fail`/`pending` days are a `warning` |
 | 3 | `indicators` | Recompute indicators (`app.indicators.service.run_compute`) | no |
 | 4 | `signals` | Regenerate strategy signals (`app.signals.service.run_signals`) | no |
 | 5 | `actions` | Pull NSE corporate actions for `[day-7, day+30]` (`app.ingest.corporate_actions.load_actions`) | no — a failure here is always a `warning` (NSE's site can 403/timeout independently of everything else) |
@@ -327,12 +329,7 @@ is `failed`, else `1`.
 
 ### Bhavcopy reconcile (`reconcile` step, `bar_checks`)
 
-**Inactive until `PRICE_SOURCE=fyers`.** On `yfinance` the step logs
-`reconcile skipped: price_source is yfinance`, writes nothing, the scheduler
-recheck does nothing, and signal generation is unchanged (Yahoo hourly would
-fail nearly every day, so nothing may gate on it before cutover).
-
-With Fyers, `reconcile` runs right after `ingest` and compares the newest
+`reconcile` runs right after `ingest` and compares the newest
 session's stored `source='fyers'` bars with NSE's raw daily bhavcopy
 (`app/ingest/bhavcopy.py`), for `1d` and `1h` (`4h` is derived from `1h`).
 Rules (pure, `app/ingest/reconcile.py`; tolerances to be tuned after the
@@ -358,11 +355,23 @@ Rules (pure, `app/ingest/reconcile.py`; tolerances to be tuned after the
 - **Not published yet** (HTTP 404/403, or a fetch error): every checked
   symbol/timeframe is written as `pending`.
 
+**Newest session.** The check never targets a session that has not closed (its
+bhavcopy cannot exist yet). Before 15:30 IST, e.g. a catch-up run in the
+morning after a missed login, the newest session it checks is the previous
+one, so it can't mark the coming session `pending` and hold every symbol's
+signals until the evening run. An explicit `--day` later than that is clamped
+to it (logged); earlier days run as given. Signal holds and the reconcile
+ignore `bar_checks` rows dated after it, so a `pending` row left by an older
+run is re-checked once its session has closed. `ingest` and the broker sync
+are unchanged and still use today (Groww only serves the current day's
+trades).
+
 `bar_checks` (PK `symbol_id, day, timeframe`; index `(status, day)`) holds
 `status` (`pass`/`fail`/`pending`), signed diffs (ours - NSE), `vol_diff_pct`,
 `bar_count`, `note`, `checked_at`. Each run checks the newest session for all
-active symbols **and** re-evaluates every existing `pending` row (any day) and
-every `fail` row within the last `SIGNAL_CHECK_LOOKBACK_SESSIONS` sessions,
+active symbols **and** re-evaluates every existing `pending` row (any day up to
+that session) and every `fail` row within the last
+`SIGNAL_CHECK_LOOKBACK_SESSIONS` sessions,
 so a late bhavcopy, or a day that ingest's overlap re-fetch has corrected,
 clears itself. Find open items:
 
@@ -372,17 +381,24 @@ FROM bar_checks b JOIN symbols s ON s.id = b.symbol_id
 WHERE b.status IN ('fail','pending') ORDER BY b.day DESC, s.symbol;
 ```
 
-**Signal holds.** With `PRICE_SOURCE=fyers`, `signals` skips a symbol/timeframe
+**Signal holds.** `signals` skips a symbol/timeframe
 (leaving its previous signals untouched) if it has a `fail`/`pending` row in
 the last `SIGNAL_CHECK_LOOKBACK_SESSIONS` sessions: `1d` signals follow the
 `1d` check, `1h` and `4h` signals follow the `1h` check. Held items are listed
 in the signals step message (`... held (failed/pending bar check): SYM:tf`).
 Position evaluation is unaffected.
 
-**Recheck.** The scheduler's `recheck_time` run (once per trading day) runs
-`daily_sync.py --steps reconcile,signals`, picking up a late-published
-bhavcopy; `recheck_last_run` is recorded even if it fails. It is a logged
-no-op on `PRICE_SOURCE=yfinance`.
+**Recheck.** The scheduler's `recheck_time` run (once per trading day) calls
+`run_reconcile()` directly (default day, all active symbols) and logs its
+summary. Besides the status counts it carries `resolved` (rows that were
+`pending`/`fail` and now `pass`) and `changed_symbols` (sorted names with a
+resolved row or a close patch in that run). Signals are regenerated **only**
+for those symbols, as `daily_sync.py --steps signals --symbols A,B,...` (all
+timeframes; held pairs are still skipped). If none changed it logs `recheck:
+nothing changed, signals not regenerated` and stops, so a quiet night
+regenerates nothing, while a late bhavcopy (rows going `pending` -> `pass`)
+regenerates everything it unblocked. `recheck_last_run` is recorded even if it
+fails. The recheck does not recompute indicators; the next daily run does.
 
 Needs migration `c3d8f1a5e602` (`alembic upgrade head`); `daily_sync` and the
 scheduler refuse to run until applied.
@@ -498,8 +514,9 @@ reads the job times from the Admin page, and when it is a trading day, the
 IST time has passed `daily_job_time` and `daily_job_last_run` is not today,
 runs the full daily job in-process and records `daily_job_last_run` (even if
 a step failed; fix and re-run from Ops -> Triggers). The `recheck_time` run
-executes `reconcile,signals` (a no-op on `PRICE_SOURCE=yfinance`). `--dry-run`
-logs what would run. The launchd plist stays for local use.
+does the bhavcopy reconcile and regenerates signals only for the symbols it
+changed (see "Bhavcopy reconcile"). `--dry-run` logs what would run. The
+launchd plist stays for local use.
 
 A stuck run can also be reaped standalone:
 `.venv/bin/python scripts/reap_stale_runs.py [--hours 6]`.
@@ -931,7 +948,6 @@ to the full active universe).
 | Broker sync fails, account's `last_sync_status = "auth_failed"` | Bad TOTP secret/API key, or an auth error that also burned Groww's current-day trade window | Fix credentials; then **that day's trades are gone from the broker API** — recover via `POST /broker-accounts/{account_id}/import-tradebook` with a manually exported CSV |
 | `unmapped` symbols listed after a tradebook import/sync | Broker's ISIN/tradingsymbol didn't match any existing `Symbol`; a new one was auto-created with no candle history yet | Check the `unmapped` list; backfill via `POST /ingest/run {"symbols":[...]}` |
 | `scripts/validate.py` Layer-1 `FAIL` on the 4h-vs-1h check, only during market hours | The current 4h bin's 1h candles exist but its own 4h row is withheld until the bin closes (13:15/15:30 IST) — see §4 | Re-run after 15:30 IST, or disregard a `FAIL` confined to today |
-| 1h/4h signals look unreliable / RVOL looks wrong | Documented in `docs/UI_HANDOFF.md`: ~13% of Yahoo hourly bars have zero volume, distorting every volume-gated strategy on 1h/4h | Treat 1h/4h as experimental; use `timeframe=1d` for real decisions |
 | `docker exec stockscreen-db ...` / `docker compose up -d` fails to connect | Docker daemon/Desktop isn't running | Start Docker Desktop, then `docker compose up -d` |
 | `stockscreen-api` exits 1 with `entrypoint: database unreachable after N attempts` | Wrong `DATABASE_URL` for the container (e.g. `localhost:5433`, which inside the container is the container itself), or the DB is genuinely down | `docker compose config \| grep DATABASE_URL` — in-network it must be `db:5432`; §9 |
 | `stockscreen-api` restarts in a loop right after a deploy | Two replicas raced `alembic upgrade head`; the loser fails the startup schema check | `RUN_MIGRATIONS=0` on the replicas, migrate once as a release step (§9) |
@@ -1019,7 +1035,7 @@ That is the whole configuration surface for a single instance:
 | `DB_WAIT_SECONDS` | no | `60` | How long to wait for the DB before exiting 1 |
 | `TZ` | no | `Asia/Kolkata` | A few paths date off the local clock (e.g. the default corporate-actions window); "today" here always means the Indian trading day |
 
-Everything else in §1's table (`HOURLY_BACKFILL_DAYS`, `FETCH_DELAY_SECONDS`,
+Everything else in §1's table (`HOURLY_BACKFILL_DAYS`,
 `CHANDELIER_ATR_MULTIPLE`, ...) is optional and keeps its `app/config.py`
 default unless set.
 
@@ -1154,9 +1170,9 @@ in the same one-off container, before deploying the older image.
   committed `.env`. Rotating it invalidates every stored credential.
 - **Dependency pinning.** `requirements.txt` uses `>=`, so two builds of the
   same commit can resolve different versions. Pin (or add a lockfile) before
-  this matters — yfinance in particular moves fast.
-- **Outbound network.** The container needs egress to Yahoo Finance
-  (yfinance), `archives.nseindia.com` (the Nifty 500 list),
+  this matters.
+- **Outbound network.** The container needs egress to the Fyers API
+  (`api-t1.fyers.in`, `api-t1.fyers.in/data`), `archives.nseindia.com` (the Nifty 500 list),
   `www.nseindia.com` (corporate actions) and Groww's API. NSE blocks
   non-browser clients often; the universe fetch has a static fallback
   (`app/universe.py`), corporate actions do not.
@@ -1165,6 +1181,87 @@ in the same one-off container, before deploying the older image.
   restart mid-run leaves an `IngestRun` stuck `running` (reap it, §4). Scale
   with replicas only after checking that the 409 in-progress guard —
   which is DB-level — is doing what you want across them.
+
+### Cutover to Fyers (VPS)
+
+One-time switch of the stored history from the old yfinance rows to Fyers
+(`scripts/cutover_to_fyers.py`). **This branch has no yfinance fallback:**
+once it is deployed, ingest only works through Fyers, so do the cutover in the
+same session as the deploy rather than leaving the new image running on old
+data overnight.
+
+1. **Back up** the database, from the VPS host. `DATABASE_URL` lives in
+   `/etc/stockscreen.env`, not in the host shell; it carries the
+   `postgresql+psycopg://` scheme, which libpq tools (`psql`, `pg_dump`,
+   `pg_restore`) reject; and the app image has no `pg_dump`. So read the URL out
+   of the env file, drop `+psycopg`, and run the tools from a `postgres` image:
+
+   ```
+   PGURL=$(grep '^DATABASE_URL=' /etc/stockscreen.env | cut -d= -f2- | sed 's/+psycopg//')
+   docker run --rm postgres:16 psql "$PGURL" -Atc 'show server_version'   # pick the image major >= this
+   docker run --rm -v /var/backups:/backups postgres:<major> pg_dump -Fc "$PGURL" -f /backups/stockscreen-pre-fyers-$(date +%F).dump
+   ```
+
+   - **Why `grep`/`cut` and not `source /etc/stockscreen.env`:** a URL with
+     query parameters contains `&` (`...?sslmode=require&...`). Sourced, the
+     shell reads that `&` as "run in the background", so the assignment runs in
+     a subshell and `DATABASE_URL` ends up unset or cut short. `cut -d= -f2-`
+     takes everything after the first `=`, so an `=` inside the password
+     survives too.
+   - **Version:** `pg_dump` and `pg_restore` must be the same or a newer major
+     version than the server (an older one refuses to run). Use the
+     `server_version` printed above to pick `<major>`, and use the same image
+     for a restore.
+   - **Postgres on the VPS host itself** (the host in `DATABASE_URL` is
+     `localhost`/`127.0.0.1`): add `--network host` to each of these
+     `docker run`s, otherwise `localhost` is the container.
+
+2. **Deploy this image.** Migrations run on start. Set `FYERS_CLIENT_ID`,
+   `FYERS_SECRET_KEY`, `FYERS_REDIRECT_URI=https://<host>/fyers/callback` and
+   `BROKER_MASTER_KEY` in `/etc/stockscreen.env`, and set the same redirect URL
+   on the Fyers developer dashboard.
+3. **Admin page:** turn the daily job **OFF** (the script refuses to start
+   while it is on, exit 3), then **Log in to Fyers**.
+4. **Run the cutover** inside tmux/nohup so it survives the SSH session. First
+   the dry run (lists what would be rebuilt/skipped and the request estimate):
+
+   ```
+   docker run --rm --env-file /etc/stockscreen.env -e RUN_MIGRATIONS=0 <image> python scripts/cutover_to_fyers.py --dry-run
+   ```
+
+   then the real thing (drop `--dry-run`; `--symbols A,B` / `--limit N` for a
+   trial):
+
+   ```
+   docker run --rm --env-file /etc/stockscreen.env -e RUN_MIGRATIONS=0 <image> python scripts/cutover_to_fyers.py
+   ```
+
+   It makes ~6,500 requests (5 daily + 8 hourly per symbol). Measured: about
+   5.3 s per symbol, so ~45 minutes for ~500 symbols, and then indicators and
+   signals are recomputed for everything. Plan for 1-1.5 hours and start right
+   after logging in, so it finishes well before 06:00 IST, when the Fyers token
+   expires. (The dry run's estimate is just requests / `FYERS_RPS`, the best
+   case.) Each symbol is rebuilt in its own transaction (fetch first, then
+   wipe + insert), so a failed symbol keeps its old data. If it is interrupted
+   or the token dies (exit 2), log in again on the Admin page and rerun:
+   symbols already fully `source='fyers'` are skipped. Exit 0 means every
+   symbol succeeded; only then (or with `--compute-anyway`) it recomputes
+   indicators and signals for all timeframes and prints signal counts
+   before/after per timeframe.
+5. **Validate:** `docker run --rm --env-file /etc/stockscreen.env -e RUN_MIGRATIONS=0 <image> python scripts/validate.py`.
+   Check Layer 3: no non-`fyers` candle rows, `bar_checks` counts, and the
+   "Fyers left a demerger cliff" list (report only).
+6. **Re-enable scheduling:** add the `scheduler_tick.py` cron entry (see the
+   scheduler section above) and turn the daily job back **ON** on the Admin
+   page.
+7. **Rollback:** redeploy the previous image tag and restore the backup. Same
+   rules as the backup: run it from the host, with the same `postgres:<major>`
+   image, `--network host` if Postgres is on the host, and the `PGURL=` line
+   from step 1 first if this is a new shell:
+
+   ```
+   docker run --rm -v /var/backups:/backups postgres:<major> pg_restore --clean --if-exists --no-owner -d "$PGURL" /backups/stockscreen-pre-fyers-<date>.dump
+   ```
 
 ---
 
