@@ -1,4 +1,4 @@
-"""Daily orchestration job: reap -> ingest -> indicators -> signals ->
+"""Daily orchestration job: reap -> ingest -> reconcile -> indicators -> signals ->
 actions -> broker -> ledger -> evaluate, for one trading day.
 
 Meant to be invoked by cron/launchd shortly after the 15:30 IST close (see
@@ -28,6 +28,7 @@ from app.brokers.service import sync_account  # noqa: E402
 from app.db import assert_schema_current, engine, SessionLocal  # noqa: E402
 from app.indicators.service import run_compute  # noqa: E402
 from app.ingest.corporate_actions import load_actions  # noqa: E402
+from app.ingest.reconcile_service import run_reconcile  # noqa: E402
 from app.ingest.service import run_ingest  # noqa: E402
 from app.market_calendar import is_trading_day, last_trading_day, now_ist  # noqa: E402
 from app.models import TIMEFRAMES, BrokerAccount, IngestRun  # noqa: E402
@@ -42,7 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 STEP_ORDER = (
-    "reap", "ingest", "indicators", "signals",
+    "reap", "ingest", "reconcile", "indicators", "signals",
     "actions", "broker", "ledger", "evaluate",
 )
 
@@ -157,6 +158,21 @@ def _step_ingest(day: date, symbols: list[str] | None, timeframes: list[str]) ->
     run_id = _create_run("incremental", timeframes)
     run_ingest(run_id, "incremental", timeframes, symbols)
     return _finalize_worker_step("ingest", run_id)
+
+
+def _step_reconcile(day: date, symbols: list[str] | None, timeframes: list[str]) -> dict:
+    """Bhavcopy check of the newest session (no-op unless PRICE_SOURCE=fyers).
+    Failed/pending days are a warning, not a failure: they hold that symbol's
+    signals (see app.signals.service) but never stop the pipeline."""
+    result = run_reconcile(day, symbols)
+    if result["skipped"]:
+        return {"step": "reconcile", "status": "ok", "message": result["message"],
+                "detail": result}
+    message = (f"{result['pass']} pass, {result['fail']} fail, "
+               f"{result['pending']} pending, {result['patched']} close-patched")
+    status = "warning" if result["fail"] or result["pending"] else "ok"
+    return {"step": "reconcile", "status": status, "message": message,
+            "detail": result}
 
 
 def _step_indicators(day: date, symbols: list[str] | None, timeframes: list[str]) -> dict:
@@ -323,6 +339,7 @@ def _step_evaluate(day: date, symbols: list[str] | None, timeframes: list[str]) 
 STEP_FUNCS = {
     "reap": _step_reap,
     "ingest": _step_ingest,
+    "reconcile": _step_reconcile,
     "indicators": _step_indicators,
     "signals": _step_signals,
     "actions": _step_actions,
@@ -337,7 +354,8 @@ STEP_FUNCS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Daily orchestration job: reap stale runs, ingest, compute "
+            "Daily orchestration job: reap stale runs, ingest, reconcile "
+            "against the NSE bhavcopy, compute "
             "indicators, generate signals, load corporate actions, sync "
             "broker accounts, apply the trade ledger, and evaluate open "
             "positions -- in that order, for one trading day."

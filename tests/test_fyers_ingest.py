@@ -292,3 +292,16 @@ def test_yfinance_path_unchanged(monkeypatch):
     service.run_ingest(1, "backfill", ["1d"], None)
     assert calls == [("A", "1d")] and run.status == "completed"
     assert seen == [("1d", (), {})]  # default source/basis: not stamped fyers
+
+
+def test_wipe_symbol_deletes_bar_checks_too():
+    from app.models import BarCheck, Candle, IndicatorValue
+    seen = []
+
+    class FakeSession:
+        def execute(self, stmt):
+            seen.append(stmt.table.name)
+
+    service._wipe_symbol(FakeSession(), 7)
+    assert seen == [Candle.__tablename__, IndicatorValue.__tablename__,
+                    BarCheck.__tablename__]

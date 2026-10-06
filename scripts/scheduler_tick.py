@@ -3,7 +3,8 @@
 Reads the admin job settings (app_settings) and, when due, runs:
   - the daily job (scripts/daily_sync.py, all steps, in-process) at
     `daily_job_time` IST on a trading day, once per day;
-  - the bhavcopy re-check at `recheck_time` IST (not built yet: Step 5).
+  - the bhavcopy re-check at `recheck_time` IST (daily_sync --steps
+    reconcile,signals), once per day; picks up a late-published bhavcopy.
 
 A Postgres advisory lock makes overlapping ticks (a long daily job still
 running when the next cron fires) exit immediately.
@@ -29,8 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger("scheduler_tick")
 
 LOCK_KEY = 7_204_001  # arbitrary app-wide advisory lock id
-# Flip once Step 5 (reconcile step in daily_sync) exists, and wire run_recheck.
-RECHECK_BUILT = False
+RECHECK_BUILT = True
 
 
 def is_due(
@@ -56,8 +56,18 @@ def run_daily_job() -> int:
     return daily_sync.main([])
 
 
-def run_recheck() -> None:
-    logger.info("reconcile step not built yet; recheck skipped")
+def run_recheck() -> int:
+    """Re-run reconcile (resolves pending/failed days once the bhavcopy is
+    out or ingest re-fetched good bars) then signals. A no-op unless
+    PRICE_SOURCE=fyers: on yfinance there is nothing to reconcile and the
+    daily job's signals are already current."""
+    from app.config import settings
+    from scripts import daily_sync
+
+    if settings.price_source != "fyers":
+        logger.info("recheck skipped: price_source is %s", settings.price_source)
+        return 0
+    return daily_sync.main(["--steps", "reconcile,signals"])
 
 
 def tick(dry_run: bool = False) -> None:
@@ -88,14 +98,23 @@ def tick(dry_run: bool = False) -> None:
     if is_due(now, cfg["recheck_time"], settings_store.get_date(cfg, "recheck_last_run"),
               trading, bool(cfg["daily_job_enabled"])):
         if not RECHECK_BUILT:
-            run_recheck()
+            logger.info("recheck not built; skipped")
             return
         logger.info("recheck due (%s IST)", cfg["recheck_time"])
         if dry_run:
             return
-        run_recheck()
-        with SessionLocal() as session:
-            settings_store.set_last_run(session, "recheck_last_run", now.date())
+        code: int | None = None
+        try:
+            code = run_recheck()
+        except Exception:
+            logger.exception("recheck raised")
+        finally:
+            # Marked done even on failure, like the daily job: retrying every
+            # 5 minutes would be worse; trigger manually from Ops -> Triggers.
+            with SessionLocal() as session:
+                settings_store.set_last_run(session, "recheck_last_run", now.date())
+        logger.info("recheck finished, exit code %s",
+                    "FAILED (exception)" if code is None else code)
 
 
 def main(argv: list[str] | None = None) -> int:

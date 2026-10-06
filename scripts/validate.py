@@ -18,12 +18,8 @@ up and exempted; anything else that differs is a real failure.
 Run: .venv/bin/python scripts/validate.py
 """
 
-import io
 import random
-import ssl
 import sys
-import urllib.request
-import zipfile
 from datetime import timedelta
 
 import pandas as pd
@@ -32,6 +28,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, ".")
 from app.db import engine  # noqa: E402
+from app.ingest.bhavcopy import fetch_bhavcopy  # noqa: E402
 from app.market_calendar import IST, last_trading_day, now_ist  # noqa: E402
 import exchange_calendars as xcals  # noqa: E402
 
@@ -159,33 +156,6 @@ print("=" * 70)
 print("LAYER 2: sampled daily candles vs official NSE bhavcopy")
 print("=" * 70)
 
-try:
-    import certifi
-    SSL_CTX = ssl.create_default_context(cafile=certifi.where())
-except ImportError:
-    SSL_CTX = ssl.create_default_context()
-
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-
-
-def fetch_bhavcopy(day) -> pd.DataFrame | None:
-    url = ("https://nsearchives.nseindia.com/content/cm/"
-           f"BhavCopy_NSE_CM_0_0_0_{day.strftime('%Y%m%d')}_F_0000.csv.zip")
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA, "Referer": "https://www.nseindia.com/"})
-    try:
-        with urllib.request.urlopen(req, timeout=45, context=SSL_CTX) as r:
-            raw = r.read()
-    except urllib.error.HTTPError:
-        return None
-    with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        raw = z.read(z.namelist()[0])
-    df = pd.read_csv(io.BytesIO(raw))
-    df = df[df["SctySrs"].isin(["EQ", "BE", "BZ"])]
-    return df.set_index("TckrSymb")
-
-
 def split_ratio_since(symbol: str, day) -> float:
     """Cumulative split ratio applied to `symbol` strictly after `day`.
 
@@ -225,7 +195,11 @@ def matches(ours, official, ratio=1.0):
 t_last = last_trading_day()
 older = last_trading_day(t_last - timedelta(days=21))
 for day, label in [(t_last, "latest trading day"), (older, "~3 weeks back")]:
-    bhav = fetch_bhavcopy(day)
+    try:
+        bhav = fetch_bhavcopy(day)
+    except Exception as e:
+        print(f"[WARN] bhavcopy for {day} failed ({e}), skipping")
+        continue
     if bhav is None:
         print(f"[WARN] bhavcopy for {day} not available, skipping")
         continue

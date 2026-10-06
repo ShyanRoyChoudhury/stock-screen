@@ -25,12 +25,8 @@ Run:
 import argparse
 import logging
 import os
-import ssl
 import sys
 import time
-import urllib.request
-import zipfile
-import io
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from pathlib import Path
@@ -41,6 +37,7 @@ from sqlalchemy import bindparam, text
 
 sys.path.insert(0, ".")
 from app.db import engine  # noqa: E402
+from app.ingest.bhavcopy import eq_row as bhav_row_for, fetch_bhavcopy  # noqa: E402
 from app.market_calendar import IST, last_trading_day, now_ist, shift_sessions  # noqa: E402
 
 logging.basicConfig(level=logging.WARNING)
@@ -389,49 +386,7 @@ def reconciliation_sessions(n: int) -> list[date]:
     return sorted(shift_sessions(anchor, -i) for i in range(n))
 
 
-# ============================================================ bhavcopy ====
-# Copied from scripts/validate.py (fetch_bhavcopy, ~lines 172-186) rather
-# than imported, since importing validate.py would execute its module body.
-# The plan (Step 3) moves this into app/ingest/bhavcopy.py, at which point
-# both this script and validate.py should import it from there instead.
-
-try:
-    import certifi
-    _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
-except ImportError:
-    _SSL_CTX = ssl.create_default_context()
-
-_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-
-
-def fetch_bhavcopy(day: date) -> pd.DataFrame | None:
-    url = ("https://nsearchives.nseindia.com/content/cm/"
-           f"BhavCopy_NSE_CM_0_0_0_{day.strftime('%Y%m%d')}_F_0000.csv.zip")
-    req = urllib.request.Request(url, headers={
-        "User-Agent": _UA, "Referer": "https://www.nseindia.com/"})
-    try:
-        with urllib.request.urlopen(req, timeout=45, context=_SSL_CTX) as r:
-            raw = r.read()
-    except urllib.error.HTTPError:
-        return None
-    with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        raw = z.read(z.namelist()[0])
-    df = pd.read_csv(io.BytesIO(raw))
-    df = df[df["SctySrs"].isin(["EQ", "BE", "BZ"])]
-    return df.set_index("TckrSymb")
-
-
-def bhav_row_for(bhav: pd.DataFrame | None, symbol: str) -> dict | None:
-    """The EQ-series row for `symbol` out of fetch_bhavcopy()'s frame (which
-    also carries BE/BZ rows) -- Step 3's rules key off the EQ series."""
-    if bhav is None or symbol not in bhav.index:
-        return None
-    rows = bhav.loc[[symbol]]
-    eq = rows[rows["SctySrs"] == "EQ"]
-    if eq.empty:
-        return None
-    return eq.iloc[0].to_dict()
+# bhavcopy download/lookup lives in app.ingest.bhavcopy (fetch_bhavcopy, eq_row).
 
 
 def stored_hourly(conn, symbol_id: int, day: date, timeframe: str = "1h",

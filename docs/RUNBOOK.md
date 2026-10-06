@@ -32,6 +32,8 @@ All settings, in `app/config.py` order:
 | `DAILY_BACKFILL_PERIOD` | `daily_backfill_period` | `"5y"` | yfinance `period=` for daily backfill |
 | `FETCH_DELAY_SECONDS` | `fetch_delay_seconds` | `0.5` | Sleep between per-symbol Yahoo fetches |
 | `INCREMENTAL_OVERLAP_DAYS` | `incremental_overlap_days` | `2` | An incremental ingest re-fetches this many days before the last stored candle; the upsert dedupes and also picks up any Yahoo revisions |
+| `PRICE_SOURCE` | `price_source` | `yfinance` | Market-data provider: `yfinance` (legacy) or `fyers`. The bhavcopy reconcile step and signal holds (section 4, "Bhavcopy reconcile") are active **only** when this is `fyers` |
+| `SIGNAL_CHECK_LOOKBACK_SESSIONS` | `signal_check_lookback_sessions` | `20` | With `PRICE_SOURCE=fyers`: a symbol with a `fail`/`pending` `bar_checks` row in the last N sessions gets no new signals (its previous signals are kept) |
 | `BROKER_MASTER_KEY` | `broker_master_key` | unset (`None`) | Fernet key encrypting `broker_accounts.credentials_enc` / `access_token_enc`. Unset until generated; `app.brokers.crypto` raises `MasterKeyMissing` on first use |
 | `GROWW_REQUEST_TIMEOUT` | `groww_request_timeout` | `30` | Timeout (seconds) for outbound Groww API calls |
 | `FYERS_CLIENT_ID` | `fyers_client_id` | `""` | Fyers API app id, e.g. `XXXX-100` |
@@ -124,7 +126,7 @@ or a tool without a TTY.)
 `\dt` lists 14 tables (13 app tables + Alembic's own `alembic_version`):
 `symbols`, `candles`, `corporate_actions`, `indicator_values`, `signals`,
 `ingest_runs`, `users`, `broker_accounts`, `positions`, `broker_trades`,
-`broker_holdings_snapshots`, `sell_allocations`, `position_evaluations`.
+`broker_holdings_snapshots`, `sell_allocations`, `position_evaluations`, plus `data_feed_sessions`, `app_settings` and `bar_checks` (migration `c3d8f1a5e602`).
 
 ### Row counts per table
 
@@ -273,7 +275,7 @@ with an existing user.
 ### `scripts/daily_sync.py`
 
 The daily orchestration job — chains the whole pipeline for one trading
-day, in order: **reap → ingest → indicators → signals → actions → broker →
+day, in order: **reap → ingest → reconcile → indicators → signals → actions → broker →
 ledger → evaluate**. Calls `app.db.assert_schema_current` first and refuses
 to run at all if the DB isn't on the latest migration.
 
@@ -284,7 +286,7 @@ to run at all if the DB isn't on the latest migration.
 | Flag | Default | Notes |
 |---|---|---|
 | `--day YYYY-MM-DD` | last trading day | Trading day to run for |
-| `--steps a,b,c` | all, in `STEP_ORDER` | Subset of `reap,ingest,indicators,signals,actions,broker,ledger,evaluate` (always executed in that canonical order regardless of the order typed) |
+| `--steps a,b,c` | all, in `STEP_ORDER` | Subset of `reap,ingest,reconcile,indicators,signals,actions,broker,ledger,evaluate` (always executed in that canonical order regardless of the order typed) |
 | `--symbols A,B` | full active universe | Passthrough to ingest/indicators/signals; upper-cased |
 | `--timeframes 1h,4h,1d` | all three | Passthrough to ingest/indicators/signals |
 | `--json` | off | Print only the JSON summary (for scripting/alerting) |
@@ -301,6 +303,7 @@ Two smoke-run forms:
 |---|---|---|---|
 | 1 | `reap` | Fails any `IngestRun` stuck `status="running"` for 6h+ (dead process) — see `scripts/reap_stale_runs.py` | no (always `ok`) |
 | 2 | `ingest` | Incremental candle pull (`app.ingest.service.run_ingest`) | no — the rest of the pipeline still runs on yesterday's candles, marked `degraded` in the summary |
+| 2b | `reconcile` | Nightly NSE bhavcopy check of the newest session (`app.ingest.reconcile_service.run_reconcile`); a logged no-op unless `PRICE_SOURCE=fyers`. See "Bhavcopy reconcile" below | no — `fail`/`pending` days are a `warning` |
 | 3 | `indicators` | Recompute indicators (`app.indicators.service.run_compute`) | no |
 | 4 | `signals` | Regenerate strategy signals (`app.signals.service.run_signals`) | no |
 | 5 | `actions` | Pull NSE corporate actions for `[day-7, day+30]` (`app.ingest.corporate_actions.load_actions`) | no — a failure here is always a `warning` (NSE's site can 403/timeout independently of everything else) |
@@ -321,6 +324,68 @@ Output (non-`--json`): `daily_sync 2026-09-22 [DEGRADED: ingest failed]` header,
 then one `  STATUS   step        message` line per step, then
 `  counts: {'ok': N, 'warning': N, 'failed': N}`. Exit `0` unless any step
 is `failed`, else `1`.
+
+### Bhavcopy reconcile (`reconcile` step, `bar_checks`)
+
+**Inactive until `PRICE_SOURCE=fyers`.** On `yfinance` the step logs
+`reconcile skipped: price_source is yfinance`, writes nothing, the scheduler
+recheck does nothing, and signal generation is unchanged (Yahoo hourly would
+fail nearly every day, so nothing may gate on it before cutover).
+
+With Fyers, `reconcile` runs right after `ingest` and compares the newest
+session's stored `source='fyers'` bars with NSE's raw daily bhavcopy
+(`app/ingest/bhavcopy.py`), for `1d` and `1h` (`4h` is derived from `1h`).
+Rules (pure, `app/ingest/reconcile.py`; tolerances to be tuned after the
+60-session switchover check):
+
+| Timeframe | Pass when |
+|---|---|
+| `1d` | open/high/low/close each within Rs 0.05 of `OpnPric`/`HghPric`/`LwPric`/`ClsPric`; volume `==` `TtlTradgVol` |
+| `1h` | max high / min low within 0.05 of NSE's; first open within 0.05 of `OpnPric`; exactly 7 bars; `(sum(volume) - TtlTradgVol) / TtlTradgVol` within -5% .. +2% |
+
+- **Close patch.** If a day passes everything but the last 1h bar's close
+  differs from `LastPric` by more than 0.05, the bar's close is set to
+  `LastPric` (high/low widened if needed), the day's `4h` bars are
+  recomputed from the patched `1h` bars, and the day stays `pass` with
+  `note='close patched'`. A day failing any other rule is `fail`, never
+  patched.
+- **Series.** A scrip is matched on series `EQ`, else `BE`, else `BZ` (a
+  stock moved to trade-to-trade is still traded; noted `series BE`). No row
+  at all -> `fail`, `note='not in bhavcopy'`.
+- **Special sessions.** `app.market_calendar` has no special/Muhurat-session
+  support. The 7-bar rule is applied only on days the calendar lists as
+  sessions; on any other day it is skipped (price and volume rules still run).
+- **Not published yet** (HTTP 404/403, or a fetch error): every checked
+  symbol/timeframe is written as `pending`.
+
+`bar_checks` (PK `symbol_id, day, timeframe`; index `(status, day)`) holds
+`status` (`pass`/`fail`/`pending`), signed diffs (ours - NSE), `vol_diff_pct`,
+`bar_count`, `note`, `checked_at`. Each run checks the newest session for all
+active symbols **and** re-evaluates every existing `pending` row (any day) and
+every `fail` row within the last `SIGNAL_CHECK_LOOKBACK_SESSIONS` sessions,
+so a late bhavcopy, or a day that ingest's overlap re-fetch has corrected,
+clears itself. Find open items:
+
+```sql
+SELECT s.symbol, b.day, b.timeframe, b.status, b.note
+FROM bar_checks b JOIN symbols s ON s.id = b.symbol_id
+WHERE b.status IN ('fail','pending') ORDER BY b.day DESC, s.symbol;
+```
+
+**Signal holds.** With `PRICE_SOURCE=fyers`, `signals` skips a symbol/timeframe
+(leaving its previous signals untouched) if it has a `fail`/`pending` row in
+the last `SIGNAL_CHECK_LOOKBACK_SESSIONS` sessions: `1d` signals follow the
+`1d` check, `1h` and `4h` signals follow the `1h` check. Held items are listed
+in the signals step message (`... held (failed/pending bar check): SYM:tf`).
+Position evaluation is unaffected.
+
+**Recheck.** The scheduler's `recheck_time` run (once per trading day) runs
+`daily_sync.py --steps reconcile,signals`, picking up a late-published
+bhavcopy; `recheck_last_run` is recorded even if it fails. It is a logged
+no-op on `PRICE_SOURCE=yfinance`.
+
+Needs migration `c3d8f1a5e602` (`alembic upgrade head`); `daily_sync` and the
+scheduler refuse to run until applied.
 
 ### `scripts/reap_stale_runs.py`
 
@@ -433,7 +498,7 @@ reads the job times from the Admin page, and when it is a trading day, the
 IST time has passed `daily_job_time` and `daily_job_last_run` is not today,
 runs the full daily job in-process and records `daily_job_last_run` (even if
 a step failed; fix and re-run from Ops -> Triggers). The `recheck_time` run
-is a logged no-op until the bhavcopy reconcile step exists. `--dry-run`
+executes `reconcile,signals` (a no-op on `PRICE_SOURCE=yfinance`). `--dry-run`
 logs what would run. The launchd plist stays for local use.
 
 A stuck run can also be reaped standalone:

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     fyers_request_timeout: int = 30
     # How many trading sessions after a fill to search for a matching signal.
     match_window_sessions: int = 5
+    # With price_source=fyers: a symbol with a failed/pending bar_checks row in
+    # the last N sessions gets no new signals (previous ones are kept).
+    signal_check_lookback_sessions: int = 20
     # Max % gap between a signal's entry and the fill price to still match.
     match_max_price_gap_pct: float = 5.0
     # ATR multiple for the chandelier trailing stop on matched positions.

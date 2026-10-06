@@ -23,7 +23,7 @@ from app.ingest.fyers_session import FyersLoginRequired
 from app.ingest.resample import resample_1h_to_4h
 from app.market_calendar import IST, is_trading_day, now_ist
 from app.models import (
-    PRICE_BASIS_DEFAULT, Candle, IndicatorValue, IngestRun, Symbol,
+    PRICE_BASIS_DEFAULT, BarCheck, Candle, IndicatorValue, IngestRun, Symbol,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,6 +213,10 @@ def _wipe_symbol(session: Session, symbol_id: int) -> None:
     session.execute(
         delete(IndicatorValue).where(IndicatorValue.symbol_id == symbol_id)
     )
+    # Old bar_checks describe replaced data; stale 'fail' rows re-checked
+    # against the raw bhavcopy could never pass after a re-adjustment, which
+    # would hold the symbol's signals for the whole lookback.
+    session.execute(delete(BarCheck).where(BarCheck.symbol_id == symbol_id))
 
 
 def _ingest_symbol_fyers(

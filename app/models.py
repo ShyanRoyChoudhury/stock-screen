@@ -558,3 +558,32 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class BarCheck(Base):
+    """Nightly reconcile result for one (symbol, session day, timeframe).
+
+    timeframe is '1d' or '1h' (4h follows 1h). status: pass | fail | pending
+    (bhavcopy not yet published). Diffs are signed, ours minus NSE. Used by
+    signal generation to hold symbols whose recent data has not been
+    verified (only when PRICE_SOURCE=fyers). See app.ingest.reconcile.
+    """
+
+    __tablename__ = "bar_checks"
+    __table_args__ = (Index("ix_bar_checks_status_day", "status", "day"),)
+
+    symbol_id: Mapped[int] = mapped_column(ForeignKey("symbols.id"), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(4), primary_key=True)
+    source: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(8))
+    high_diff: Mapped[float | None] = mapped_column(Float)
+    low_diff: Mapped[float | None] = mapped_column(Float)
+    open_diff: Mapped[float | None] = mapped_column(Float)
+    close_diff: Mapped[float | None] = mapped_column(Float)
+    vol_diff_pct: Mapped[float | None] = mapped_column(Float)
+    bar_count: Mapped[int | None] = mapped_column()
+    note: Mapped[str | None] = mapped_column(String(128))
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
