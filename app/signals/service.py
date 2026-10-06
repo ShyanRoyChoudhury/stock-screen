@@ -7,15 +7,18 @@ revisions can therefore never leave stale signals behind.
 
 import logging
 import math
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
 from sqlalchemy import delete, select
 
+from app.config import settings
 from app.db import SessionLocal
 from app.indicators.service import load_candles
-from app.market_calendar import now_ist
-from app.models import TIMEFRAMES, IngestRun, Signal, Symbol
+from app.ingest import reconcile
+from app.market_calendar import last_closed_session, now_ist, shift_sessions
+from app.models import TIMEFRAMES, BarCheck, IngestRun, Signal, Symbol
 from app.signals.core import STRATEGY_FUNCS
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,30 @@ def signal_to_row(sig: dict, symbol_id: int, timeframe: str) -> dict:
     }
 
 
+def held_window(now: datetime | None = None) -> tuple[date, date]:
+    """(cutoff, anchor): the bar_checks days that can hold signals. The anchor
+    is the newest session that has CLOSED, not today -- a session still ahead
+    has no bhavcopy to check against, so it never holds anything; the cutoff is
+    `signal_check_lookback_sessions` sessions back from it (anchor included)."""
+    anchor = last_closed_session(now)
+    cutoff = shift_sessions(anchor, -(settings.signal_check_lookback_sessions - 1))
+    return cutoff, anchor
+
+
+def load_held(session) -> set[tuple[int, str]]:
+    """{(symbol_id, check_timeframe)} with a fail/pending bar_checks row in
+    the last `signal_check_lookback_sessions` sessions up to the newest closed
+    one (see held_window). One query per run, served by
+    ix_bar_checks_status_day."""
+    cutoff, anchor = held_window()
+    rows = session.execute(
+        select(BarCheck.symbol_id, BarCheck.timeframe, BarCheck.day, BarCheck.status)
+        .where(BarCheck.status.in_((reconcile.FAIL, reconcile.PENDING)),
+               BarCheck.day >= cutoff, BarCheck.day <= anchor)
+    ).all()
+    return reconcile.held_pairs(rows, cutoff, latest_day=anchor)
+
+
 def run_signals(run_id: int, timeframes: list[str] | None,
                 symbols: list[str] | None,
                 strategies: list[str] | None) -> None:
@@ -75,10 +102,18 @@ def run_signals(run_id: int, timeframes: list[str] | None,
         run.symbols_total = len(syms)
         session.commit()
 
+        # Unverified data (failed/pending reconcile): keep the previous
+        # signals untouched rather than regenerating them from bad bars.
+        held = load_held(session)
+        held_report: list[str] = []
+
         for sym in syms:
             wrote = 0
             try:
                 for tf in tfs:
+                    if reconcile.is_held(held, sym.id, tf):
+                        held_report.append(f"{sym.symbol}:{tf}")
+                        continue
                     df = load_candles(session, sym.id, tf)
                     if df.empty:
                         continue
@@ -111,6 +146,10 @@ def run_signals(run_id: int, timeframes: list[str] | None,
             f"{run.symbols_ok}/{run.symbols_total} symbols ok, "
             f"{run.candles_written} signals written"
         )
+        if held_report:
+            run.message += (f"; {len(held_report)} symbol/timeframe(s) held "
+                            f"(failed/pending bar check): {', '.join(held_report)}")
+        run.message = run.message[:511]
     except Exception as e:
         logger.exception("Signal run %s crashed", run_id)
         run.status = "failed"

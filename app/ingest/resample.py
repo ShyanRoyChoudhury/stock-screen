@@ -1,6 +1,6 @@
 """Session-anchored 1h → 4h resampling for NSE.
 
-Yahoo has no 4h interval, so 4h candles are built from hourly ones.
+Fyers has no 4h interval, so 4h candles are built from hourly ones.
 The NSE session is 09:15–15:30, giving two bins per day:
 09:15–13:15 (hours 09:15, 10:15, 11:15, 12:15) and 13:15–15:30
 (hours 13:15, 14:15, 15:15). Bin ts = bin start, matching the 1h convention.

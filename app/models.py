@@ -26,15 +26,24 @@ TRADE_SIDES = ("BUY", "SELL")
 POSITION_STATUSES = ("open", "closed")
 VERDICTS = ("HOLD", "PARTIAL", "EXIT", "REVIEW")
 
-# Adjustment conventions a stored price series can be on.
-#   splits_only  — split/bonus adjusted, dividends left in the price.
-#                  yfinance auto_adjust=False, and TradingView's native basis.
+# Adjustment conventions a stored price series can be on. Every candle write
+# is fyers_adjusted (app.ingest.service.FYERS_BASIS), and that is also the
+# Python and server default of candles.price_basis (migration c85fe6dc94cf).
+# The other values are legacy (old rows, history, comparisons) and are kept so
+# they stay valid.
+#   splits_only  — LEGACY: split/bonus adjusted, dividends left in the price
+#                  (the former yfinance rows; TradingView's native basis).
 #   unadjusted   — raw traded prices, nothing applied. NSE bhavcopy.
 #   total_return — splits and dividends both removed (yfinance auto_adjust=True).
 #                  Not stored: Yahoo re-scales it retroactively on every
 #                  ex-dividend date, so stored rows drift out of date.
-PRICE_BASES = ("splits_only", "unadjusted", "total_return")
-PRICE_BASIS_DEFAULT = "splits_only"
+#   fyers_adjusted — CURRENT: split/bonus/rights adjusted by Fyers (bonus ratios are
+#                  rounded, e.g. 1.33), demergers only sometimes, dividends NOT
+#                  adjusted. Treated like splits_only downstream. Fyers can
+#                  re-adjust history retroactively; ingest detects that and
+#                  re-downloads the symbol.
+PRICE_BASES = ("splits_only", "unadjusted", "total_return", "fyers_adjusted")
+PRICE_BASIS_DEFAULT = "fyers_adjusted"
 
 # Corporate action types that move the price. NSE publishes many more
 # (AGM, EGM, interest payments); those are filtered out at ingest.
@@ -81,7 +90,7 @@ class Candle(Base):
     low: Mapped[float] = mapped_column(Float)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[int] = mapped_column(BigInteger)
-    source: Mapped[str] = mapped_column(String(16), default="yfinance")
+    source: Mapped[str] = mapped_column(String(16), default="fyers")
     # Which adjustment convention these prices are on. NOT part of uq_candle:
     # one basis is canonical at a time, and re-ingesting on a different basis
     # should overwrite rather than duplicate. The column exists so a partially
@@ -521,4 +530,64 @@ class PositionEvaluation(Base):
     days_held: Mapped[int] = mapped_column()
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DataFeedSession(Base):
+    """The shared market-data feed login (one row per provider, 'fyers').
+
+    `access_token_enc` is Fernet-encrypted (app.brokers.crypto); `expires_at`
+    comes from the token's JWT `exp` claim. Never exposed by the API.
+    """
+
+    __tablename__ = "data_feed_sessions"
+
+    provider: Mapped[str] = mapped_column(String(16), primary_key=True)
+    access_token_enc: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    logged_in_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    logged_in_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AppSetting(Base):
+    """Key-value admin settings (see app.settings_store for keys/defaults)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[object] = mapped_column(JSONB)
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class BarCheck(Base):
+    """Nightly reconcile result for one (symbol, session day, timeframe).
+
+    timeframe is '1d' or '1h' (4h follows 1h). status: pass | fail | pending
+    (bhavcopy not yet published). Diffs are signed, ours minus NSE. Used by
+    signal generation to hold symbols whose recent data has not been
+    verified. See app.ingest.reconcile.
+    """
+
+    __tablename__ = "bar_checks"
+    __table_args__ = (Index("ix_bar_checks_status_day", "status", "day"),)
+
+    symbol_id: Mapped[int] = mapped_column(ForeignKey("symbols.id"), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(4), primary_key=True)
+    source: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(8))
+    high_diff: Mapped[float | None] = mapped_column(Float)
+    low_diff: Mapped[float | None] = mapped_column(Float)
+    open_diff: Mapped[float | None] = mapped_column(Float)
+    close_diff: Mapped[float | None] = mapped_column(Float)
+    vol_diff_pct: Mapped[float | None] = mapped_column(Float)
+    bar_count: Mapped[int | None] = mapped_column()
+    note: Mapped[str | None] = mapped_column(String(128))
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )

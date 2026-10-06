@@ -20,6 +20,9 @@ import type {
   Verdict,
   ActionType,
   Broker,
+  FyersStatus,
+  AdminSettings,
+  AdminSettingsUpdate,
 } from './types'
 
 function qs(params: object): string {
@@ -198,4 +201,32 @@ export function matchPosition(id: number, body: { strategy: Strategy; ts: string
 
 export function reattributeSell(sellId: number, body: { allocations: { position_id: number; quantity: number }[] }): Promise<unknown> {
   return apiFetch(`/positions/trades/${sellId}/reattribute`, { method: 'POST', body, auth: true })
+}
+
+// ---------------------------------------------------------------------------
+// Fyers feed login + admin settings (authenticated)
+// ---------------------------------------------------------------------------
+
+export function fyersStatus(): Promise<FyersStatus> {
+  return apiFetch('/fyers/status', { auth: true })
+}
+
+export function fyersLoginUrl(): Promise<{ url: string }> {
+  return apiFetch('/fyers/login-url', { method: 'POST', auth: true })
+}
+
+export function fyersCompleteLogin(body: { auth_code: string; state: string }): Promise<FyersStatus> {
+  return apiFetch('/fyers/session', { method: 'POST', auth: true, body })
+}
+
+export function fyersLogout(): Promise<void> {
+  return apiFetch('/fyers/session', { method: 'DELETE', auth: true })
+}
+
+export function getAdminSettings(): Promise<AdminSettings> {
+  return apiFetch('/admin/settings', { auth: true })
+}
+
+export function putAdminSettings(body: AdminSettingsUpdate): Promise<AdminSettings> {
+  return apiFetch('/admin/settings', { method: 'PUT', auth: true, body })
 }

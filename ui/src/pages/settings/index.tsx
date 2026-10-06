@@ -11,6 +11,7 @@ const KEYBOARD_ROWS: [string, string][] = [
   ['g r', 'Trades'],
   ['g b', 'Brokers'],
   ['g o', 'Data & Ops'],
+  ['g a', 'Admin'],
   ['/', 'Find symbol'],
   ['j k / ↑↓', 'Move row cursor (click a table first)'],
   ['↵', 'Expand / open row'],

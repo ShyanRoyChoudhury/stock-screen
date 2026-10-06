@@ -1,6 +1,8 @@
 """Matches a broker fill to the strategy signal that likely produced it.
 
-Candles are stored split/bonus-adjusted ("splits_only"); broker fills are RAW
+Candles are stored fyers_adjusted (split/bonus/rights adjusted by Fyers,
+bonus ratios rounded, demergers sometimes, dividends not; legacy rows say
+"splits_only"); broker fills are RAW
 prices in the share terms of their own trade date. A fill is first restated
 into stored terms (fill_price_in_stored_terms, via
 app.indicators.adjust.structural_factor_after) so it is comparable to a

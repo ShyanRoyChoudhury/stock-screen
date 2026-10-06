@@ -1,8 +1,8 @@
 # NSE Market Data Service
 
-FastAPI service that pulls Nifty 500 OHLCV data from Yahoo Finance into a
+FastAPI service that pulls Nifty 500 OHLCV data from Fyers into a
 Dockerized Postgres, at three timeframes: **1h** (fetched), **4h** (derived —
-Yahoo has no 4h interval; resampled session-anchored 09:15–13:15 / 13:15–15:30),
+Fyers has no 4h interval; resampled session-anchored 09:15–13:15 / 13:15–15:30),
 and **1d** (fetched). Extracted from `nifty500_scanner.ipynb`; the
 calculation/signal layer comes next and will read candles from this DB.
 
@@ -40,9 +40,9 @@ curl localhost:8000/ingest/runs/1                    # poll status
 curl "localhost:8000/candles/RELIANCE?timeframe=4h&limit=10"
 ```
 
-- `mode: "backfill"` — 730 days of 1h (Yahoo's cap) + 5 years of 1d.
+- `mode: "backfill"` — 728 days of 1h + 5 years of 1d (needs a Fyers login on the Admin page).
 - `mode: "incremental"` — refetches from 2 days before the last stored candle;
-  upserts are idempotent, so re-runs and Yahoo revisions are safe. This is the
+  upserts are idempotent, so re-runs and Fyers revisions are safe. This is the
   call a daily cron will make later.
 - Optional `"symbols": ["RELIANCE", ...]` restricts a run (useful for testing);
   `"timeframes": ["1h","4h","1d"]` restricts timeframes.
@@ -80,7 +80,9 @@ session close) has passed.
 
 - `candles.ts` is the candle **start**, timezone-aware. Daily candles use
   09:15 IST (session open). Unique on `(symbol_id, timeframe, ts)`.
-- Prices are split-adjusted, dividend-unadjusted (yfinance `auto_adjust=False`).
+- Prices are split-, bonus- and rights-adjusted by Fyers (bonus ratios are
+  rounded to 2 decimals; demergers only sometimes); dividends are **not**
+  adjusted. `price_basis` = `fyers_adjusted`.
 - `ingest_runs` records every run's status, counts, and per-symbol errors.
 
 ## Daily job

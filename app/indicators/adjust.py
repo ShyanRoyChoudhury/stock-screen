@@ -1,6 +1,9 @@
 """Read-time price adjustment from the corporate actions table.
 
-Candles are stored splits_only (see fetch_ohlcv). This turns that stored
+Candles are now stored fyers_adjusted (split/bonus/rights adjusted by Fyers,
+bonus ratios rounded, demergers sometimes, dividends not). Legacy rows may
+still say splits_only: the same dividend-unadjusted shape, handled
+identically here. This turns that stored
 series into any other convention on demand, so the stored numbers stay
 immutable while the convention becomes a query parameter.
 
@@ -16,6 +19,9 @@ the structural factors that followed it.
 """
 
 import pandas as pd
+
+# Stored bases that already have splits/bonuses applied and dividends left in.
+STORED_BASES = ("splits_only", "fyers_adjusted")
 
 
 def structural_factor_after(actions: pd.DataFrame, when) -> float:
@@ -40,10 +46,11 @@ def adjustment_series(
     ex_date (date), value, price_factor. Returns a factor per bar; multiply
     the stored OHLC by it.
 
-    Only 'total_return' differs from the stored basis — splits and bonuses are
-    already applied, so re-applying them would double-count.
+    Only 'total_return' differs from the stored bases (splits_only /
+    fyers_adjusted) — splits and bonuses are already applied, so re-applying
+    them would double-count.
     """
-    if basis == "splits_only" or actions.empty or closes.empty:
+    if basis in STORED_BASES or actions.empty or closes.empty:
         return pd.Series(1.0, index=closes.index)
     if basis != "total_return":
         raise ValueError(f"unsupported basis {basis!r}")
@@ -96,13 +103,14 @@ def volume_factor_series(
     window spanning a 2:1 split reads a phantom 2x surge. Dividends do not
     change share count.
 
-    Only 'unadjusted' volume (NSE bhavcopy) needs this. yfinance volume is
-    already split- and bonus-adjusted, like its price: RELIANCE's volume shows
+    Only 'unadjusted' volume (NSE bhavcopy) needs this. Legacy yfinance volume
+    was already split- and bonus-adjusted, like its price: RELIANCE's volume shows
     no 2x step across its 2024-10-28 1:1 bonus (median 17.9M before, 13.6M
     after). Applying this to splits_only volume would double-adjust it, so
-    that case returns 1.0.
+    that case returns 1.0. Fyers volume is likewise split-adjusted
+    (fyers_adjusted).
     """
-    if source_basis == "splits_only":
+    if source_basis in STORED_BASES:
         return pd.Series(1.0, index=volumes.index)
     if source_basis != "unadjusted":
         raise ValueError(f"unsupported source_basis {source_basis!r}")

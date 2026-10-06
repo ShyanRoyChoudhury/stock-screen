@@ -11,6 +11,8 @@ const TradesPage = lazy(() => import('./pages/trades'))
 const BrokersPage = lazy(() => import('./pages/brokers'))
 const OpsPage = lazy(() => import('./pages/ops'))
 const OptionsPage = lazy(() => import('./pages/options'))
+const AdminPage = lazy(() => import('./pages/admin'))
+const FyersCallbackPage = lazy(() => import('./pages/admin/FyersCallback'))
 const SettingsPage = lazy(() => import('./pages/settings'))
 
 function NotFound() {
@@ -36,6 +38,8 @@ export default function App() {
           <Route path="/brokers" element={<BrokersPage />} />
           <Route path="/ops" element={<OpsPage />} />
           <Route path="/options" element={<OptionsPage />} />
+          <Route path="/admin" element={<AdminPage />} />
+          <Route path="/fyers/callback" element={<FyersCallbackPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>

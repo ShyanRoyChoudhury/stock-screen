@@ -28,3 +28,13 @@ def encrypt_json(data: dict) -> str:
 
 def decrypt_json(token: str) -> dict:
     return json.loads(_fernet().decrypt(token.encode()).decode())
+
+
+def encrypt_text(text: str) -> str:
+    return _fernet().encrypt(text.encode()).decode()
+
+
+def decrypt_text(token: str, ttl: int | None = None) -> str:
+    """Decrypt a Fernet token. With `ttl` (seconds), a token older than that
+    raises cryptography.fernet.InvalidToken, same as a tampered one."""
+    return _fernet().decrypt(token.encode(), ttl=ttl).decode()

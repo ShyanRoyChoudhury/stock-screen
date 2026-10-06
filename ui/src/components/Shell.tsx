@@ -20,6 +20,7 @@ function navCurrent(pathname: string): string | null {
   if (pathname.startsWith('/trades')) return 'trades'
   if (pathname.startsWith('/brokers')) return 'brokers'
   if (pathname.startsWith('/ops')) return 'ops'
+  if (pathname.startsWith('/admin') || pathname.startsWith('/fyers')) return 'admin'
   if (pathname.startsWith('/options')) return 'options'
   if (pathname.startsWith('/settings')) return 'settings'
   return null
@@ -136,7 +137,7 @@ export function Shell({ children }: ShellProps) {
         return
       }
       if (Date.now() - g < 900) {
-        const map: Record<string, string> = { t: '/', s: '/signals', p: '/positions', r: '/trades', b: '/brokers', o: '/ops' }
+        const map: Record<string, string> = { t: '/', s: '/signals', p: '/positions', r: '/trades', b: '/brokers', o: '/ops', a: '/admin' }
         const path = map[e.key]
         if (path) {
           e.preventDefault()
